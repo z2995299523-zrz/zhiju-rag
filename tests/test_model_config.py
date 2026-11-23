@@ -46,15 +46,18 @@ class ModelConfigTests(unittest.TestCase):
                 elif self.path.endswith("/embeddings"):
                     body = json.dumps({"data": [{"index": i, "embedding": [1, 2]}
                                                 for i, _ in enumerate(payload["input"])]}).encode()
-                elif payload.get("stream"):
+                elif len(payload["messages"]) > 1:
                     data = json.loads(payload["messages"][-1]["content"])
-                    first = data["candidates"][0]
-                    text = first["text"] + " [" + first["source"] + "]"
-                    delta = json.dumps({"choices": [{"delta": {"content": text}}]})
-                    body, mime = f"data: {delta}\n\ndata: [DONE]\n\n".encode(), "text/event-stream"
+                    first = data["sources"][0]
+                    text = "报销时需提交报销申请单和有效发票。"
+                    answer = json.dumps({"text": text, "support": [{"id": first["id"], "quote": first["text"]}]})
+                    if payload.get("stream"):
+                        delta = json.dumps({"choices": [{"delta": {"content": answer}}]})
+                        body, mime = f"data: {delta}\n\ndata: [DONE]\n\n".encode(), "text/event-stream"
+                    else:
+                        body = json.dumps({"choices": [{"message": {"content": answer}}]}).encode()
                 else:
-                    answer = '{"keys":["q1"]}' if len(payload["messages"]) > 1 else "OK"
-                    body = json.dumps({"choices": [{"message": {"content": answer}}]}).encode()
+                    body = json.dumps({"choices": [{"message": {"content": "OK"}}]}).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", mime)
                 self.send_header("Content-Length", str(len(body)))
@@ -107,7 +110,9 @@ class ModelConfigTests(unittest.TestCase):
             tested.raise_for_status()
             self.assertTrue(tested.json()["ok"])
         question = {"question": "科研项目经费报销需要哪些材料？", "mode": "documents"}
-        self.assertEqual(self.admin.post("/api/query", json=question).json()["status"], "answered")
+        returned = self.admin.post("/api/query", json=question).json()
+        self.assertEqual(returned["status"], "answered")
+        self.assertIn("报销时需提交报销申请单和有效发票。 [S1]", returned["answer"])
         stream = self.admin.post("/api/query/stream", json=question)
         self.assertIn("event: done", stream.text)
         self.assertNotIn("fixture-key", stream.text)

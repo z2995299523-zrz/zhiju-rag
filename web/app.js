@@ -367,7 +367,7 @@ function paintTurn(turn, controls = false) {
   const label = article.querySelector(".answer-status");
   if (label.textContent !== status) label.textContent = status;
   label.hidden = !status;
-  renderMarkdown(article.querySelector(".answer-copy"), result, turn.phase === "streaming");
+  renderMarkdown(article.querySelector(".answer-copy"), result, turn.phase !== "complete");
   if (controls) {
     const count = result.citations?.length || 0;
     const actions = article.querySelector(".answer-sources");

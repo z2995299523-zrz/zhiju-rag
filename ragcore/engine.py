@@ -8,8 +8,9 @@ from contextlib import aclosing
 from pathlib import Path
 
 from . import model_config, models, retrieval
+from .answer_text import data_paragraphs, document_paragraphs
 from .connectors import ConnectorError, ConnectorRead, execute
-from .query_trace import QueryTrace, active_stage, stage_note
+from .query_trace import QueryTrace, active_stage
 from .storage import pack
 
 
@@ -75,10 +76,11 @@ def workspace_answer(result, *, show_sql=False):
                 visible["redacted"] = True
                 # Only rewrite the saved API paragraph. If an older answer format
                 # cannot be matched safely, keep its redacted rows available.
-                before = (describe_rows(source, result["question"]) if answer and source.get("id") and
-                          all(isinstance(row, dict) for row in source["rows"]) else None)
-                answer = (answer.replace(before, describe_rows(visible, result["question"]))
-                          if before and before in answer else "此回答包含受限字段，请在来源中查看可展示的记录。")
+                if result.get("answer_format_version") != 2:
+                    before = (describe_rows(source, result["question"]) if answer and source.get("id") and
+                              all(isinstance(row, dict) for row in source["rows"]) else None)
+                    answer = (answer.replace(before, describe_rows(visible, result["question"]))
+                              if before and before in answer else "此回答包含受限字段，请在来源中查看可展示的记录。")
         citations.append(visible)
     return {**result, "citations": citations, "answer": answer, "params": display_fields(params) if params is not None else {}}
 
@@ -135,6 +137,7 @@ def row_lines(source, question):
 
 
 def describe_rows(source, question):
+    """Reconstruct the exact text format of legacy replies for permission-aware replay."""
     return "\n".join(row_lines(source, question))
 
 
@@ -179,6 +182,20 @@ async def query_events(store, owner, question, mode, overrides, selected_id, *,
         raise
     finally:
         active_stage.reset(token)
+
+
+async def _document_parts(question, sources, stream_model):
+    if not models.model_enabled():
+        for index, paragraph in enumerate(document_paragraphs(question, sources)):
+            yield ("\n\n" if index else "") + paragraph
+    elif stream_model:
+        async with aclosing(models.stream_answer(question, sources)) as upstream:
+            async for part in upstream:
+                yield part
+    else:
+        text = await asyncio.to_thread(models.synthesize, question, sources)
+        if text:
+            yield text
 
 
 async def _generate(store, owner, question, mode, overrides, selected_id, stream_model, show_sql,
@@ -228,6 +245,8 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
                     trace.mark("failed")
                     failed = True
                     notes.append(f"数据接口未完成查询。{exc}")
+    insufficient_text = ("现有文档没有给出足以回答所问内容的依据。" if re.search(r"[\u3400-\u9fff]", question)
+                         else "The available documents do not establish the answer to this question.")
     if docs_needed:
         trace.start("retrieval")
         yield "status", {"message": "正在检索文档并定位相关原文…"}
@@ -236,7 +255,7 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
         citations.extend(docs)
         if not docs:
             trace.mark("empty")
-            notes.append("已导入的文件中未检索到足以回答这个问题的原文。")
+            notes.append(insufficient_text)
     trace.start("generation")
     snapshots = []
     for index, source in enumerate(citations, start=1):
@@ -244,8 +263,6 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
         if source["kind"] == "api":
             snapshots.append((source["id"], source["sha256"], source.pop("_raw")))
     document_cites = [s for s in citations if s["kind"] == "document"]
-    if any("· OCR 识别" in source["locator"] for source in document_cites):
-        notes.append("标注 OCR 的片段由图片识别得到，金额和编号请对照引用的原页核验。")
     useful = bool(document_cites) or any(s.get("rows") for s in citations)
     if needs_input:
         status = "needs_input"
@@ -257,48 +274,52 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
         status = "partial"
     else:
         status = "answered"
-    result = {"question": question, "intent": intent, "status": status, "answer": "",
+    result = {"question": question, "intent": intent, "status": status, "answer": "", "answer_format_version": 2,
               "citations": citations, "params": params, "connector_id": plan["connector_id"], "missing": missing,
               "reason": plan.get("reason", "")}
     if parent_id is not None:
         result["parent_id"] = parent_id
-    visible_sources = workspace_answer(result, show_sql=show_sql)["citations"]
-    yield "evidence", {"citations": visible_sources}
+    original_sources = {s["id"]: s for s in citations}
+    visible_sources = {s["id"]: s for s in workspace_answer(result, show_sql=show_sql)["citations"]}
+    used_sources = {sid: source for sid, source in visible_sources.items() if source["kind"] == "api"}
+    yield "evidence", {"citations": list(used_sources.values())}
     yield "status", {"message": "正在整理回答…"}
     narrative = []
-    for source, visible in zip(citations, visible_sources):
-        if source["kind"] == "api":
-            prefix = "\n\n" if narrative else ""
-            lines = []
-            for line in row_lines(visible, question):
-                lines.append(line)
-                yield "delta", {"text": prefix + line}
-                prefix = "\n"
-            narrative.append(describe_rows(source, question) if visible.get("redacted") else "\n".join(lines))
+    for visible in used_sources.values():
+        for paragraph in data_paragraphs(visible, question):
+            yield "delta", {"text": ("\n\n" if narrative else "") + paragraph}
+            narrative.append(paragraph)
     generated = []
-    if document_cites and models.model_enabled():
+    if document_cites:
         prefix = "\n\n" if narrative else ""
-        if stream_model:
-            async with aclosing(models.stream_answer(question, document_cites)) as upstream:
-                async for part in upstream:
-                    if part:
-                        yield "delta", {"text": prefix + part}
-                        generated.append(part)
-                        prefix = ""
-        else:
-            selected = await asyncio.to_thread(models.synthesize, question, document_cites)
-            if selected:
-                generated.append(selected)
-                yield "delta", {"text": prefix + selected}
-        if not generated:
-            stage_note("extractive_fallback")
+        try:
+            async with aclosing(_document_parts(question, document_cites, stream_model)) as parts:
+                async for part in parts:
+                    if not part:
+                        continue
+                    # Model paragraphs end with server-validated IDs. The synchronous path
+                    # may deliver several lines in a single response.
+                    cited = re.findall(r"\[(S\d+)\](?=(?: \[S\d+\])*(?:\n|$))", part)
+                    if any(sid not in used_sources for sid in cited):
+                        used_sources.update((sid, visible_sources[sid]) for sid in cited if sid in visible_sources)
+                        yield "evidence", {"citations": list(used_sources.values())}
+                    yield "delta", {"text": prefix + part}
+                    generated.append(part)
+                    prefix = ""
+        except models.InsufficientEvidence:
+            if generated:
+                raise models.ModelAnswerError("回答依据不完整，请重试。") from None
+    result["citations"] = [original_sources[sid] for sid in used_sources]
     if generated:
         narrative.append("".join(generated))
-    else:
-        for source in document_cites:
-            passage = f"{source['excerpt']} [{source['id']}]"
-            yield "delta", {"text": ("\n\n" if narrative else "") + passage}
-            narrative.append(passage)
+    elif document_cites:
+        if not needs_input:
+            result["status"] = "partial" if any(s.get("rows") for s in result["citations"]) else (
+                "error" if failed else "no_evidence")
+        trace.mark("empty")
+        notes.append(insufficient_text)
+    if any(s["kind"] == "document" and "· OCR 识别" in s["locator"] for s in result["citations"]):
+        notes.append("标注 OCR 的片段由图片识别得到，金额和编号请对照引用的原页核验。")
     for note in notes:
         yield "delta", {"text": ("\n\n" if narrative else "") + note}
         narrative.append(note)

@@ -139,14 +139,17 @@ input::placeholder, textarea::placeholder { color: #73807c; opacity: 1; }
 .answer-title h3 { font-size: 15px; font-weight: 650; }
 .answer-symbol { width: 27px; height: 27px; border-radius: 6px; display: grid; place-items: center; color: var(--teal); background: var(--pale); }
 .answer-status { margin-left: 2px; padding-left: 10px; border-left: 1px solid var(--line); color: var(--muted); font-size: 12px; }
-.answer-copy { font-size: 15px; line-height: 1.85; overflow-wrap: anywhere; color: #303d39; }
-.answer-copy:not(:empty) {
-  width: fit-content; max-width: 100%; margin-top: 7px; padding: 10px 15px;
-  background: var(--white); border: 1px solid var(--line); border-radius: 4px 14px 14px 14px;
-}
-.answer-copy p + p { margin-top: 12px; }
-.answer-copy h4 { margin: 17px 0 5px; font-size: 16px; }
-.answer-copy :is(ul,ol) { padding-inline-start: 24px; margin: 8px 0; }
+.answer-copy { max-width: 74ch; font-size: 16px; line-height: 1.75; overflow-wrap: anywhere; color: var(--ink); }
+.answer-copy:not(:empty) { margin-top: 12px; }
+.answer-copy > * { margin: 0; }
+.answer-copy > * + * { margin-top: .85em; }
+.answer-copy > * + h4 { margin-top: 1.2em; }
+.answer-copy h4 { font-size: 1.05em; line-height: 1.5; font-weight: 650; }
+.answer-copy h4 + * { margin-top: .35em; }
+.answer-copy :is(ul,ol) { padding-inline-start: 1.75em; }
+.answer-copy li { padding-inline-start: .15em; }
+.answer-copy li + li { margin-top: .35em; }
+.answer-copy li::marker { color: var(--sub); }
 .answer-copy blockquote { padding-left: 12px; border-left: 2px solid #9ebbb4; color: var(--sub); }
 .answer-copy code { background: #edf1ed; padding: 1px 4px; border-radius: 3px; font-family: Consolas, monospace; font-size: .92em; }
 .answer-copy pre { overflow-x: auto; padding: 12px; background: #edf1ed; border-radius: 5px; }
@@ -216,8 +219,8 @@ input::placeholder, textarea::placeholder { color: #73807c; opacity: 1; }
   .result-panel { gap: 16px; }
   .result-panel + .result-panel { margin-top: 25px; }
   .asked { max-width: 87%; }
-  .answer-section { width: 95%; }
-  .asked h2, .answer-copy:not(:empty) { padding: 9px 12px; }
+  .answer-section { width: 100%; }
+  .asked h2 { padding: 9px 12px; }
   .composer-dock { padding: 8px var(--gutter) max(10px, env(safe-area-inset-bottom)); }
   .composer-dock #question { height: 49px; }
   .workspace { padding-block: 25px; }

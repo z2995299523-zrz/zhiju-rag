@@ -11,6 +11,7 @@ import sys
 import time
 import webbrowser
 
+from ragcore import __version__
 from ragcore.workspace_id import workspace_id
 
 
@@ -127,7 +128,8 @@ def service_state(port):
         paths = schema.get("paths", {})
         required = {"/api/query", "/api/query/stream", "/api/query/examples", "/api/admin/models",
                     "/api/documents", "/api/documents/{doc_id}/preview", "/api/admin/retrieval/evaluate"}
-        if (schema.get("info", {}).get("title") == "企业知识检索工作台" and required.issubset(paths)
+        info = schema.get("info", {})
+        if (info.get("title") == "企业知识检索工作台" and info.get("version") == __version__ and required.issubset(paths)
                 and supports_embedded_reader(port)):
             return "ready"
     except (OSError, ValueError, AttributeError, http.client.HTTPException):

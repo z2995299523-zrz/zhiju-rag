@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from ragcore import access, model_config, models
+from ragcore import __version__, access, model_config, models
 from ragcore.connectors import ConnectorError, execute, validate_config
 from ragcore.documents import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS
 from ragcore.engine import answer_query, display_fields, query_events, query_examples, workspace_answer
@@ -103,7 +103,7 @@ def create_app(data_dir=None, seed=None):
         instance.state.workspace_id = workspace_id(store.path.parent)
         yield
 
-    app = FastAPI(title="企业知识检索工作台", version="1.3.0", docs_url=None, redoc_url=None,
+    app = FastAPI(title="企业知识检索工作台", version=__version__, docs_url=None, redoc_url=None,
                   openapi_url="/api/openapi.json", lifespan=lifespan)
     app.middleware("http")(access.guard)
     app.include_router(preview_router)
@@ -286,6 +286,8 @@ def create_app(data_dir=None, seed=None):
             result = answer_query(request.app.state.store, actor["owner"], payload.question.strip(),
                                   payload.mode, payload.params, payload.connector_id)
             return workspace_answer(result, show_sql=actor["role"] == "admin")
+        except models.ModelAnswerError as exc:
+            raise HTTPException(502, "回答生成中断，请重试。") from exc
         except KeyError as exc:
             if exc.args == ("数据接口不存在",):
                 raise HTTPException(404, exc.args[0]) from None

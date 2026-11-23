@@ -99,6 +99,35 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((failure["outcome"], failure["history_id"]), ("error", None))
         self.assertEqual((failure["stages"][-1]["name"], failure["stages"][-1]["status"]), ("generation", "failed"))
 
+    def test_evidence_arrives_with_its_supported_paragraph_or_is_omitted(self):
+        payload = {"question": "科研项目经费报销需要哪些材料？", "mode": "documents"}
+        doc = {"kind": "document", "title": "制度", "excerpt": "报销时应提交发票。", "locator": "第 2 页"}
+        candidates = [dict(doc, document_id=i) for i in (1, 2, 3)]
+
+        async def supported(question, sources):
+            yield "报销时应提交发票。 [S2]"
+            yield "\n\n相关制度列明了发票要求。 [S1]"
+
+        async def insufficient(question, sources):
+            raise engine.models.InsufficientEvidence()
+            yield
+
+        with patch.object(engine, "document_sources", side_effect=lambda *_: [d.copy() for d in candidates]), \
+                patch.object(engine.models, "model_enabled", return_value=True):
+            with patch.object(engine.models, "stream_answer", new=supported):
+                events = self.stream(self.client, payload)
+            sources = [data["citations"] for kind, data in events if kind == "evidence"]
+            self.assertEqual([[s["id"] for s in group] for group in sources], [[], ["S2"], ["S2", "S1"]])
+            self.assertEqual(events[-1][1]["result"]["citations"], sources[-1])
+            with patch.object(engine.models, "stream_answer", new=insufficient):
+                events = self.stream(self.client, payload)
+            result = events[-1][1]["result"]
+            self.assertEqual((result["status"], result["citations"]), ("no_evidence", []))
+            self.assertNotIn("[S", result["answer"])
+            self.assertEqual(self.ok(self.client.get(f"/api/history/{result['id']}"))["answer"], result["answer"])
+            with patch.object(engine.models, "synthesize", side_effect=engine.models.ModelAnswerError("test")):
+                self.assertEqual(self.client.post("/api/query", json=payload).status_code, 502)
+
     def test_request_id_recovers_lost_done_and_serializes_concurrent_retries(self):
         payload = {"request_id": str(uuid4()), "question":"科研项目经费报销需要哪些材料？", "mode":"documents"}
         started = threading.Event()

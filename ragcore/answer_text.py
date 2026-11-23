@@ -1,0 +1,115 @@
+"""Deterministic wording for connector results and model-free document answers."""
+import json
+import re
+from pathlib import Path
+
+from .retrieval import grounded_excerpts
+
+
+def _fields(row, question, dimensions=(), *, named_only=False):
+    """Keep the requested values together with their identifying columns."""
+    values = [(str(k), v) for k, v in row.items()
+              if str(k).strip() and v is not None and not isinstance(v, (dict, list))
+              and str(v).strip() and len(str(v)) <= 180]
+    requested = [(key, value) for key, value in values
+                 if (label := re.split(r"[（(]", key)[0].strip()) and label.casefold() in question.casefold()]
+    if named_only:
+        return requested
+    selected = dict(requested or values[:3])
+    return [(k, v) for k, v in values if k in selected or k in dimensions]
+
+
+def _dimensions(rows):
+    label = re.compile(r"(?:名称|编号|项目|仓库|型号|日期|年度|年份|地区|城市|部门|类别|季度|月份)$"
+                       r"|(?:^|_)(?:id|name|code|year|date|region|department|category|month|quarter)$", re.I)
+    keys = dict.fromkeys(key for row in rows for key in row)
+    return [key for key in keys if label.search(key) and len({str(row.get(key)) for row in rows}) > 1][:2]
+
+
+def _description(fields):
+    parts = []
+    for key, value in fields:
+        text = str(value)
+        if isinstance(value, bool):
+            text = "是" if value else "否"
+        unit = re.fullmatch(r"(.+?)[（(](万元|亿元|元|件|台|人|吨|小时|分钟|%)[）)]", key)
+        if unit and re.fullmatch(r"[+-]?[\d,]+(?:\.\d+)?", text):
+            key = unit[1]
+            text += (" " if unit[2] != "%" else "") + unit[2]
+        gap = " " if re.match(r"[A-Za-z0-9+\-]", text) else ""
+        parts.append(f"{key}为{gap}{text}")
+    return "，".join(parts)
+
+
+def _named_description(fields, question):
+    description = _description(_fields(fields, question, named_only=True))
+    return description + "。" if description else ""
+
+
+def data_paragraphs(source, question):
+    rows = source["rows"]
+    cite = f" [{source['id']}]"
+    if not rows:
+        yield "按当前筛选条件查询到 0 条记录。" + cite
+        return
+    row = rows[0]
+    if (source.get("demo") and len(rows) == 1 and "执行率" in question and
+            {"项目名称", "年度", "预算执行率", "已执行金额（万元）", "预算金额（万元）"} <= row.keys()):
+        yield f"{row['项目名称']} {row['年度']} 年的预算执行率为 **{row['预算执行率']}**。" + cite
+        yield f"已执行 {row['已执行金额（万元）']} 万元，年度预算为 {row['预算金额（万元）']} 万元。" + cite
+        return
+    if len(rows) == 1:
+        fields = _fields(row, question)
+        if fields:
+            yield _description(fields) + "。" + cite
+        else:
+            yield "查询到 1 条记录，字段明细见本次查询结果。" + cite
+        return
+    yield f"本次查询返回 **{len(rows)} 条记录**。" + cite
+    points = []
+    dimensions = _dimensions(rows[:4])
+    for i, row in enumerate(rows[:4], 1):
+        fields = _fields(row, question, dimensions)
+        if fields:
+            points.append(f"{i}. {_description(fields)}。{cite}")
+    if points:
+        yield "\n".join(points)
+    if len(rows) > 4:
+        yield "其余记录可在本次查询的依据中查看。" + cite
+
+
+def _document_text(question, source):
+    excerpt = source["excerpt"].strip()
+    if excerpt.startswith("{"):
+        try:
+            fields = json.loads(excerpt)
+        except ValueError:
+            fields = None
+        if isinstance(fields, dict):
+            # A timestamp or record ID is not necessarily the value a question asks for.
+            return _named_description(fields, question)
+    if " ｜ " in excerpt:
+        entries = [p.partition("：") for p in excerpt.split(" ｜ ")]
+        if all(sep for _, sep, _ in entries):
+            fields = {k.strip(): v.strip() for k, _, v in entries if not re.fullmatch(r"第\s*\d+\s*列", k.strip())}
+            return _named_description(fields, question)
+    if len(excerpt) > 230:
+        shorter = grounded_excerpts(question, [{**source, "filename": source["title"], "text": excerpt}],
+                                    limit=1, max_chars=230)
+        if shorter:
+            excerpt = shorter[0]["excerpt"]
+    return excerpt
+
+
+def document_paragraphs(question, sources):
+    paragraphs = []
+    different_documents = len({s["title"] for s in sources}) > 1
+    for source in sources:
+        text = _document_text(question, source)
+        if not text:
+            continue
+        if different_documents:
+            title = Path(source["title"]).stem
+            text = f"《{title}》记载：{text}"
+        paragraphs.append(f"{text} [{source['id']}]")
+    return paragraphs
