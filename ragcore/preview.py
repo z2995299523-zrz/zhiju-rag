@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path as PathParam
 from fastapi.responses import Response
 
 from . import access
+from .ingest_worker import UploadBusyError, inspect_sheet
+from .source_window import TEXT_FORMATS, text_window
 from .storage import DOC_FIELDS
 
 
@@ -62,6 +64,31 @@ def preview(doc_id: DocumentID, request: Request, q: str = Query("", max_length=
     return {"document": meta, "chunks": [dict(chunk) for chunk in chunks], "total": total, "offset": offset,
             "limit": limit, "focus_chunk_id": focus, "original_kind": kind,
             "original_url": f"/api/documents/{doc_id}/original" if mime else None}
+
+
+@router.get("/{doc_id}/source-window", dependencies=[Depends(access.admin)])
+def source_window(doc_id: DocumentID, request: Request, chunk_id: int = Query(ge=1, le=2**63 - 1)):
+    with request.app.state.store.db() as conn:
+        row = conn.execute("""SELECT d.filename,c.locator FROM documents d JOIN chunks c ON c.document_id=d.id
+                              WHERE d.id=? AND c.id=?""", (doc_id, chunk_id)).fetchone()
+        if row is None:
+            raise HTTPException(404, "此分块不属于该文档版本")
+        suffix = Path(row["filename"]).suffix.lower()
+        if suffix not in TEXT_FORMATS and suffix != ".xlsx":
+            raise HTTPException(415, "请使用原版预览或下载原件核对")
+        data = conn.execute("SELECT content FROM documents WHERE id=?", (doc_id,)).fetchone()[0]
+        header = None
+        if suffix in {".csv", ".tsv"}:
+            header = conn.execute("SELECT locator FROM chunks WHERE document_id=? ORDER BY id LIMIT 1",
+                                  (doc_id,)).fetchone()[0]
+    try:
+        if suffix == ".xlsx":
+            return inspect_sheet(data, row["locator"])
+        return text_window(data, row["locator"], header, plain=suffix in {".md", ".txt"})
+    except UploadBusyError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 def byte_range(header, size):

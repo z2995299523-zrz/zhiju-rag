@@ -10,6 +10,9 @@ import math
 import re
 import unicodedata
 from collections import Counter
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import PurePath
 
@@ -218,6 +221,109 @@ def rank_chunks(question: str, chunks: list[dict], limit: int = 5) -> list[dict]
         ranked.append({**chunk, "score": round(score, 5)})
     ranked.sort(key=lambda entry: entry["score"], reverse=True)
     return ranked[:limit]
+
+
+@dataclass
+class DocumentRanking:
+    candidates: list[dict]
+    ranked: list[dict]
+    candidate_method: str
+    ranking_method: str
+
+
+# asyncio.to_thread inherits the evaluation context, including its per-case collector.
+_observed_rankings = ContextVar("observed_rankings", default=None)
+
+
+@contextmanager
+def observe_rankings():
+    rankings = []
+    token = _observed_rankings.set(rankings)
+    try:
+        yield rankings
+    finally:
+        _observed_rankings.reset(token)
+
+
+def rank_document_chunks(store, question: str) -> DocumentRanking:
+    """The query, admin diagnostic and offline evaluation share this ranking pass."""
+    from . import models
+
+    candidates, method = store.candidates(question, with_method=True)
+    lexical = rank_chunks(question, candidates, limit=8)
+    semantic = None
+    ranking_method = "lexical"
+    if candidates and models.embedding_enabled():
+        semantic = models.semantic_rank(question, filter_evidence(question, candidates), limit=8)
+        ranking_method = "hybrid" if semantic else "lexical_fallback"
+    if semantic:
+        # Fuse positions because lexical scores and cosines use different scales.
+        scores, items = {}, {}
+        for ranking in (lexical, semantic):
+            for place, item in enumerate(ranking):
+                key = item["id"]
+                scores[key] = scores.get(key, 0) + 1 / (20 + place)
+                items[key] = item
+        ranked = [items[key] for key in sorted(scores, key=scores.get, reverse=True)]
+    else:
+        ranked = [item for item in lexical if item["score"] >= lexical[0]["score"] * 0.78]
+    result = DocumentRanking(candidates, ranked, method, ranking_method)
+    observed = _observed_rankings.get()
+    if observed is not None:
+        observed.append(result)
+    return result
+
+
+def validate_evidence_labels(labels):
+    """Each label identifies one required piece of evidence; fields match exactly."""
+    if not isinstance(labels, list) or not labels:
+        raise ValueError("文档评测须标注至少一项预期依据")
+    seen = set()
+    for label in labels:
+        if not isinstance(label, dict) or set(label) - {"filename", "sha256", "locator", "chunk_id"}:
+            raise ValueError("预期依据只支持 filename、sha256、locator 和 chunk_id")
+        if not isinstance(label.get("filename"), str) or not label["filename"].strip():
+            raise ValueError("预期依据缺少文件名")
+        if "sha256" in label and (not isinstance(label["sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", label["sha256"])):
+            raise ValueError("预期依据的 sha256 须为 64 位小写十六进制摘要")
+        if "locator" in label and (not isinstance(label["locator"], str) or not label["locator"].strip()):
+            raise ValueError("预期依据的位置不能为空")
+        if "chunk_id" in label and (type(label["chunk_id"]) is not int or label["chunk_id"] < 1):
+            raise ValueError("预期依据的 chunk_id 须为正整数")
+        key = tuple(sorted(label.items()))
+        if key in seen:
+            raise ValueError("预期依据包含重复标注")
+        seen.add(key)
+
+
+def score_evidence(ranking: DocumentRanking, labels: list[dict], top_k: int = 3) -> dict:
+    validate_evidence_labels(labels)
+    if type(top_k) is not int or not 1 <= top_k <= 180:
+        raise ValueError("top_k 须为 1 至 180 的整数")
+
+    evidence = []
+    for label in labels:
+        def matches(chunk):
+            return all(chunk.get("id" if key == "chunk_id" else key) == value for key, value in label.items())
+
+        present = any(matches(chunk) for chunk in ranking.candidates)
+        position = next((i for i, chunk in enumerate(ranking.ranked, 1) if matches(chunk)), None)
+        if not present:
+            stage = "candidate_miss"
+        elif position is None or position > top_k:
+            stage = "ranking_miss"
+        else:
+            stage = "hit"
+        evidence.append({"expected": label, "in_candidates": present, "rank": position, "stage": stage})
+    total = len(labels)
+    candidate_hits = sum(e["in_candidates"] for e in evidence)
+    top_k_hits = sum(e["stage"] == "hit" for e in evidence)
+    return {"top_k": top_k, "expected": total, "candidate_count": len(ranking.candidates),
+            "ranked_count": len(ranking.ranked), "candidate_hits": candidate_hits, "top_k_hits": top_k_hits,
+            "candidate_recall": candidate_hits / total, "top_k_recall": top_k_hits / total,
+            "first_relevant_rank": min((e["rank"] for e in evidence if e["rank"] is not None), default=None),
+            "candidate_method": ranking.candidate_method, "ranking_method": ranking.ranking_method,
+            "evidence": evidence}
 
 
 def _passages(text: str, max_chars: int):

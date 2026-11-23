@@ -51,13 +51,17 @@ def _worker_limits(suffix):
     signal.alarm(WALL_TIMEOUT_SECONDS)
 
 
-def _worker_main(suffix):
+def _worker_main(suffix, locator=None):
     from .documents import parse_document
 
     try:
         _worker_limits(suffix)
         data = sys.stdin.buffer.read(MAX_FILE_BYTES + 1)
-        entries = parse_document("upload" + suffix, data)
+        if suffix == ".xlsx" and locator is not None:
+            from .source_window import sheet_window
+            entries = sheet_window(data, locator)
+        else:
+            entries = parse_document("upload" + suffix, data)
         encoded = json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(encoded) > _MAX_RESULT_BYTES:
             raise ValueError("提取结果超过 24 MiB，请拆分文件")
@@ -71,7 +75,7 @@ def _worker_main(suffix):
     return 0
 
 
-def _run_worker(suffix, content):
+def _run_worker(suffix, content, *arguments):
     env = {key: value for key, value in os.environ.items() if key.upper() in _RUNTIME_ENV}
     if os.environ.get("RAG_OCR_ENABLED") == "1":
         env["RAG_OCR_ENABLED"] = "1"
@@ -82,7 +86,7 @@ def _run_worker(suffix, content):
         source.seek(0)
         try:
             result = subprocess.run(
-                [sys.executable, "-B", "-m", "ragcore.ingest_worker", suffix],
+                [sys.executable, "-B", "-m", "ragcore.ingest_worker", suffix, *arguments],
                 stdin=source, stdout=output, stderr=subprocess.DEVNULL,
                 cwd=_PROJECT, env=env, timeout=WALL_TIMEOUT_SECONDS, check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -105,20 +109,28 @@ def _run_worker(suffix, content):
             raise ValueError("文档解析进程返回无效结果") from exc
 
 
-def parse_upload(filename: str, content: bytes) -> list[dict]:
-    """Return the same evidence as parse_document, or raise ValueError on a failed import."""
-    suffix = Path(filename).suffix.lower()
-    if suffix not in SUPPORTED_EXTENSIONS:
-        raise ValueError(f"不支持此文件扩展名：{suffix or '无'}")
+def _bounded_worker(suffix, content, *arguments):
     if not content or len(content) > MAX_FILE_BYTES:
         raise ValueError("文件为空或超过单文件 20 MiB 上限")
     if not _SLOTS.acquire(blocking=False):
         raise UploadBusyError("文件解析任务已满，请稍后重试")
     try:
-        return _run_worker(suffix, content)
+        return _run_worker(suffix, content, *arguments)
     finally:
         _SLOTS.release()
 
 
+def parse_upload(filename: str, content: bytes) -> list[dict]:
+    """Return the same evidence as parse_document, or raise ValueError on a failed import."""
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise ValueError(f"不支持此文件扩展名：{suffix or '无'}")
+    return _bounded_worker(suffix, content)
+
+
+def inspect_sheet(content, locator):
+    return _bounded_worker(".xlsx", content, locator)
+
+
 if __name__ == "__main__":
-    sys.exit(_worker_main(sys.argv[1]) if len(sys.argv) == 2 else 1)
+    sys.exit(_worker_main(*sys.argv[1:]) if len(sys.argv) in (2, 3) else 1)

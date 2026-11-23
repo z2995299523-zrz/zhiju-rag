@@ -48,6 +48,41 @@ class ReaderApiTests(unittest.TestCase):
         with store.db() as conn:
             return store.insert_document(conn, filename, data, [{"text": "Archived scan", "locator": "第 1 页"}])["id"]
 
+    def test_import_comparison_reads_original_version_and_raw_table_lines(self):
+        source = "\n货号,备注,金额\n" + "\n".join(f"A{i},常规,{i}" for i in range(8)) + '\nZ,"两行\n备注",22'
+        doc = self.upload("对照.csv", source.encode("gb18030"))
+        chunks = self.ok(self.admin.get(f"/api/documents/{doc}/preview"))["chunks"]
+        chunk = chunks[-1]
+        root = f"/api/documents/{doc}/source-window"
+        args = {"chunk_id": chunk["id"]}
+        self.assertEqual(self.reader.get(root, params=args).status_code, 403)
+        original = self.ok(self.admin.get(root, params=args))
+        self.assertEqual((original["first"], original["last"]), (11, 12))
+        lines = {row["number"]: row["text"] for row in original["rows"]}
+        self.assertEqual([lines[n] for n in (2, 11, 12)], ["货号,备注,金额", 'Z,"两行', '备注",22'])
+        self.assertIn("金额：22", chunk["text"])
+        new = self.upload("对照.csv", b"id,n\nchanged,1")
+        self.assertEqual(self.admin.get(f"/api/documents/{new}/source-window", params=args).status_code, 404)
+        self.assertEqual(self.ok(self.admin.get(root, params=args)), original)
+
+    def test_import_comparison_xlsx_keeps_formula_blank_header_and_sheet_coordinates(self):
+        from openpyxl import Workbook
+        book = Workbook()
+        sheet = book.active
+        sheet.title = "原表"
+        sheet.append(["设备", None, "数量"])
+        sheet.append(["设备A", "原版", "=1+2"])
+        blob = io.BytesIO()
+        book.save(blob)
+        book.close()
+        doc = self.upload("备件.xlsx", blob.getvalue())
+        chunk = self.ok(self.admin.get(f"/api/documents/{doc}/preview"))["chunks"][-1]
+        source = self.ok(self.admin.get(f"/api/documents/{doc}/source-window", params={"chunk_id": chunk["id"]}))
+        self.assertEqual((source["kind"], source["sheet"], source["first"], source["last"]), ("sheet", "原表", 2, 2))
+        self.assertEqual(source["rows"][0]["cells"][:3], ["设备", "", "数量"])
+        self.assertEqual(source["rows"][1]["cells"][:3], ["设备A", "原版", "=1+2"])
+        self.assertIn("第 2 列：原版", chunk["text"])
+
     def test_conversation_replay_search_and_branch_ownership(self):
         root = self.ok(self.reader.post("/api/query", json={"question": "unique first question", "mode": "documents"}))
         def follow(parent, question):

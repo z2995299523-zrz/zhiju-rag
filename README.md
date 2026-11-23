@@ -1,6 +1,6 @@
 # 知据 · 企业知识工作台
 
-在同一条问答里查制度原文和业务数据。文件答案可回到页、行、工作表或段落，业务数值可回到当次只读接口请求和返回记录。标准版 **v1.2.0** 包含中文 Web 工作台、FastAPI 服务和 SQLite 存储。新工作区默认空白，导入资料后即可使用本地检索；管理员可随时接入对话模型和向量模型。
+在同一条问答里查制度原文和业务数据。文件答案可回到页、行、工作表或段落，业务数值可回到当次只读接口请求和返回记录。标准版 **v1.3.0** 包含中文 Web 工作台、FastAPI 服务和 SQLite 存储。新工作区默认空白，导入资料后即可使用本地检索；管理员可随时接入对话模型和向量模型。
 
 按行业交付时可复用同一版本，分别设置数据目录、模型、初始资料、只读业务接口和验收题。[行业模板与部署示例](docs/industry-profiles.md) · [五个高星 RAG 项目调研](docs/rag-projects.md)
 
@@ -36,6 +36,14 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8781 --no-proxy-headers
 “查询历史”保存当次答案及证据。文档阅读器提供原件 SHA-256，下载后可用 PowerShell 的 `Get-FileHash -Algorithm SHA256` 核对。接口来源面板显示接口名称、查询时间、已保存的业务筛选条件和记录快照。原始请求地址保存在内部归档。原始响应和提取记录分别保留校验摘要，普通成员下载时会检查所选内容中的受限字段。历史回答使用当时的快照。上游小数或超大整数超出浏览器数字精度时，记录数组以数字文本保存，原始响应保留上游字节。
 
 ## 文件与检索
+
+管理员可沿着一条错误回答，依次检查查询执行、导入分块和证据排名。
+
+| 遇到的问题 | 在工作台中核对 |
+| --- | --- |
+| 问答慢、中断或没有返回数据 | 打开「管理后台 → 知识库概览 → 查询诊断」，展开本次执行。按实际经过的阶段查看毫秒耗时、无结果、失败或中断的位置，可从已归档的执行打开对应回答。旧历史保留原内容，耗时自升级后开始记录 |
+| 回答引用了错行、表头或页码 | 在「导入管理」的导入结果或文件行点击「分块对照」。选择一个实际入库分块，在旁边核对对应版本的原件；窄屏可切换两者。PDF 按页定位，图片显示原图，文本按可用行号定位，XLSX 读取工作表中的原始单元格。需要原始版式的 DOCX、PPTX 可按提示下载核对 |
+| 提问用词和制度原文不同 | 在「管理后台 → 检索评测」输入问题，指定期望的文档或分块和检查名次。页面显示候选是否命中、重排后排第几，以及实际排在前面的分块。评测使用当前工作区的检索和向量配置，可以从结果打开原文。单题评测独立于问答历史 |
 
 在文档库点文件名或“在线查看”即可阅读已导入的文件。阅读器支持全文搜索、翻页和查看来源位置，现有文档无需重新导入。PDF、PNG 和 JPEG 还可在浏览器内查看原版。Word、Excel、PPT 等格式按导入时提取的正文、单元格或幻灯片内容展示，原件可下载。
 
@@ -114,6 +122,8 @@ $env:RAG_OCR_ENABLED = "1"
 | 在线阅读 | `GET /api/documents/{id}/preview`，用 `q` 搜索正文或位置，`limit`、`offset` 分页，`chunk_id` 直达引用所在页。支持原版预览的文件另提供 `GET /api/documents/{id}/original` |
 | 管理 / 测试接口 | `POST /api/connectors`、`PUT /api/connectors/{id}`、`POST /api/connectors/{id}/test`，测试正文示例 `{"params":{"year":2026}}` |
 | 模型配置（管理员） | `GET /api/admin/models` 查看生效配置；`PUT /api/admin/models/{kind}` 保存；`POST /api/admin/models/{kind}/test` 测试已保存配置或提交的草稿。`kind` 取 `llm` 或 `embedding` |
+| 查询诊断、检索评测（管理员） | `GET /api/admin/query-traces` 按批次读取执行；`POST /api/admin/retrieval/evaluate` 提交 `question`、`document_id`、可选 `chunk_id` 和 `top_k`，返回候选、重排名次和实际分块 |
+| 导入分块对照（管理员） | `GET /api/documents/{doc_id}/source-window?chunk_id=…` 读取所选版本的文本行或工作表单元格，PDF 与图片复用已鉴权的原版预览 |
 | 历史与概览 | `GET /api/history?scope=mine` 可用 `q` 搜索问题，`GET /api/history/{id}` 回放快照。管理员使用 `scope=workspace` 查看工作区查询，在 `GET /api/overview` 查看统计 |
 | 下载接口证据 | `GET /api/history/{id}/sources/{source_id}/raw` 下载当次原始响应，`GET /api/history/{id}/sources/{source_id}/rows` 下载提取出的记录数组，`source_id` 取本次答案内的引文编号，如 `S1` |
 | 运行检查 / 接口定义 | `GET /healthz`、`GET /api/openapi.json` |
@@ -148,6 +158,14 @@ docker compose up --build -d
 工作区内录入的模型密钥加密保存。Windows 使用运行服务账号的 DPAPI，迁移到另一台机器或另一个账号时应重新录入密钥。Linux/macOS 使用数据目录下权限为 `0600` 的 `.model-credentials.key`，恢复配置需要同时恢复数据库和此文件。数据库中的业务资料和历史需要由部署方单独保护。
 
 ## 离线验收
+
+行业题集可在每道题的顶层 `evidence` 数组标注期望的文档证据。每项需填写 `filename`，可进一步写明 `sha256`、`locator` 或该测试库的 `chunk_id`。跨部署复用时优先用版本摘要和原文位置。[题集中的报账与报销案例](eval/seed_cases.jsonl)
+
+```sh
+python -m ragcore.evaluate --top-k 3 --report retrieval-report.json
+```
+
+JSON 报告逐项给出候选命中情况和最佳重排名次。汇总以有有效标注的预期证据总数为分母，分别计算候选召回率和前 K 名召回率。纯查数题、无正例题以及未标注题单列，失效的版本或位置会提示修正。小文库使用全量候选，测试大库的召回情况需使用超过 180 个有效分块的语料。
 
 运行 `python -m ragcore.evaluate` 会在临时数据库导入演示文件和预算接口，逐题校验意图、结果状态、参数、引文编号、原文件摘要及原始接口快照。任一用例失败会返回非零退出码。复制 `eval/seed_cases.jsonl`，每行填写 `id`、`question`、`expect` 和可选的 `mode`、`params`，再用 `python -m ragcore.evaluate --cases 路径` 运行替换后的验收题。该结果只描述给定用例的通过情况，真实数据的查询准确率需要用独立业务样本评估。
 

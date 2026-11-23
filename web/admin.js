@@ -7,13 +7,19 @@ const metricDefinitions = [
 ];
 const intentLabels = { documents: "文档检索", data: "接口查询", mixed: "综合查询" };
 const statusLabels = { answered: "已回答", partial: "部分回答", no_evidence: "缺少证据", needs_input: "待补充", error: "查询失败" };
+const stageLabels = { parse: "问题解析", parameters: "核对条件", data: "业务查数", retrieval: "文档检索", generation: "生成回答", archive: "保存历史" };
+const stepResults = { ok: "完成", failed: "失败", stopped: "中断", empty: "无匹配结果", needs_input: "待补充条件", no_connector: "缺少匹配接口" };
+const stepNotes = {
+  local_route_fallback: "模型解析未完成，已使用本地规则", lexical_fallback: "向量排序未完成，已使用关键词排序",
+  embedding_busy: "向量服务繁忙，已使用关键词排序", extractive_fallback: "模型未选出可用引文，已使用原文摘录",
+};
 const displayNumber = new Intl.NumberFormat("zh-CN");
 const displayTime = new Intl.DateTimeFormat("zh-CN", {
   year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false,
 });
 
 export function managementNav(active) {
-  const sections = [["admin", "知识库概览"], ["imports", "导入管理"], ["connectors", "数据接口配置"], ["models", "模型配置"]];
+  const sections = [["admin", "知识库概览"], ["imports", "导入管理"], ["connectors", "数据接口配置"], ["models", "模型配置"], ["retrieval", "检索评测"]];
   return `<nav class="adm-nav" aria-label="管理功能">${sections.map(([route, label]) =>
     `<a href="#${route}"${active === route ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>`;
 }
@@ -52,6 +58,59 @@ export async function renderAdmin(container, ctx) {
     target.innerHTML = `<p class="adm-note" role="alert">${esc(error.message || "读取失败")} <button type="button">重试</button></p>`;
     target.querySelector("button").onclick = retry;
   }
+
+  const traceSection = document.createElement("section");
+  traceSection.className = "adm-panel adm-traces";
+  traceSection.innerHTML = `<header><h2>查询诊断</h2><button class="secondary-btn" type="button" data-refresh>刷新</button></header>
+    <div class="adm-trace-list" aria-live="polite"><p class="adm-note">正在读取查询诊断…</p></div>`;
+  shell.append(traceSection);
+  const traceList = traceSection.querySelector(".adm-trace-list");
+  const refreshTraces = traceSection.querySelector("[data-refresh]");
+  const cursors = [null];
+
+  function duration(ms) {
+    return ms < 1 ? "小于 1 毫秒" : ms < 1000 ? Math.round(ms) + " 毫秒" : (ms / 1000).toFixed(2) + " 秒";
+  }
+
+  function traceRow(run) {
+    const outcome = run.outcome === "stopped" ? "已中断" : statusLabels[run.outcome];
+    const problem = run.stages.find(step => step.status === "failed" || step.status === "stopped");
+    const steps = run.stages.map(step => `<li>
+      <span>${esc(stageLabels[step.name])}</span><span>${esc(stepResults[step.status])}</span><span>${esc(duration(step.duration_ms))}</span>
+      ${step.notes.map(note => `<small>${esc(stepNotes[note])}</small>`).join("")}</li>`).join("");
+    return `<details class="adm-trace">
+      <summary><span class="adm-trace-name">执行 #${esc(run.id)} · ${esc(intentLabels[run.mode] || "自动判断")}</span>
+        <span>${esc(timeLabel(run.started_at))}</span><span class="adm-trace-summary-status">${esc(outcome)}${problem ? " · " + esc(stageLabels[problem.name]) : ""}</span>
+        <span>${esc(duration(run.duration_ms))}</span></summary>
+      <ol>${steps}</ol><div class="adm-trace-links">
+        ${run.request_id ? `<small>请求号 ${esc(run.request_id)}</small>` : ""}
+        ${run.history_id ? `<a href="#ask/${encodeURIComponent(run.history_id)}">查看回答 #${esc(run.history_id)}</a>` : ""}</div></details>`;
+  }
+
+  async function loadTraces(pageIndex = 0) {
+    refreshTraces.disabled = true;
+    traceList.querySelectorAll("button").forEach(button => { button.disabled = true; });
+    try {
+      const before = cursors[pageIndex];
+      const page = await api("/api/admin/query-traces?limit=5" + (before ? "&before=" + before : ""));
+      traceList.innerHTML = page.items.map(traceRow).join("") || '<p class="adm-note">暂无查询诊断。新的问答执行结束后可在这里查看各阶段耗时。</p>';
+      if (pageIndex || page.next_before) {
+        traceList.insertAdjacentHTML("beforeend", `<div class="adm-pagination"><span>第 ${pageIndex + 1} 页</span>
+          <button type="button" data-prev ${pageIndex ? "" : "disabled"}>上一页</button>
+          <button type="button" data-next ${page.next_before ? "" : "disabled"}>下一页</button></div>`);
+        traceList.querySelector("[data-prev]").onclick = () => loadTraces(pageIndex - 1);
+        traceList.querySelector("[data-next]").onclick = () => {
+          cursors[pageIndex + 1] = page.next_before;
+          loadTraces(pageIndex + 1);
+        };
+      }
+    } catch (error) {
+      failure(traceList, error, () => loadTraces(pageIndex));
+    } finally {
+      refreshTraces.disabled = false;
+    }
+  }
+  refreshTraces.onclick = () => loadTraces();
 
   async function loadOverview() {
     try {
@@ -103,5 +162,5 @@ export async function renderAdmin(container, ctx) {
     }
   }
 
-  await Promise.all([loadOverview(), loadDocuments(), loadHistory(0)]);
+  await Promise.all([loadOverview(), loadDocuments(), loadHistory(0), loadTraces()]);
 }

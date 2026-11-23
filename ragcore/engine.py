@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import model_config, models, retrieval
 from .connectors import ConnectorError, ConnectorRead, execute
+from .query_trace import QueryTrace, active_stage, stage_note
 from .storage import pack
 
 
@@ -83,23 +84,7 @@ def workspace_answer(result, *, show_sql=False):
 
 
 def document_sources(store, question):
-    candidates = store.candidates(question)
-    lexical = retrieval.rank_chunks(question, candidates, limit=8)
-    semantic = None
-    if candidates and models.embedding_enabled():
-        semantic = models.semantic_rank(question, retrieval.filter_evidence(question, candidates), limit=8)
-    ranked = lexical
-    if semantic:
-        # Fuse by position: text matching and vector similarity have different score scales.
-        scores, items = {}, {}
-        for ranking in (lexical, semantic):
-            for place, item in enumerate(ranking):
-                key = item["id"]
-                scores[key] = scores.get(key, 0) + 1 / (20 + place)
-                items[key] = item
-        ranked = [items[key] for key in sorted(scores, key=scores.get, reverse=True)]
-    if ranked and not semantic:
-        ranked = [item for item in ranked if item["score"] >= ranked[0]["score"] * 0.78]
+    ranked = retrieval.rank_document_chunks(store, question).ranked
     sources = []
     for item in retrieval.grounded_excerpts(question, ranked, limit=3, max_chars=520):
         sources.append({"kind": "document", "title": item["filename"], "document_id": item["document_id"],
@@ -170,16 +155,34 @@ def query_plan(store, question, mode, selected_id):
 
 async def query_events(store, owner, question, mode, overrides, selected_id, *,
                        stream_model=True, show_sql=False, parent_id=None, return_archive=False, request_id=None):
-    with model_config.workspace(store):
-        events = _generate(store, owner, question, mode, overrides, selected_id, stream_model, show_sql,
-                           parent_id, return_archive, request_id)
-        async with aclosing(events):
-            async for event in events:
-                yield event
+    trace = QueryTrace(mode, request_id)
+    token = active_stage.set(None)
+    try:
+        trace.start("parse")
+        with model_config.workspace(store):
+            events = _generate(store, owner, question, mode, overrides, selected_id, stream_model, show_sql,
+                               parent_id, return_archive, request_id, trace)
+            async with aclosing(events):
+                async for name, data in events:
+                    if name == "done":
+                        result = data["result"]
+                        await trace.finish(store, result["status"], result["id"])
+                    yield name, data
+    except (GeneratorExit, asyncio.CancelledError):
+        if not trace.finished:
+            trace.mark("stopped")
+            await trace.finish(store, "stopped")
+        raise
+    except Exception:
+        trace.mark("failed")
+        await trace.finish(store, "error")
+        raise
+    finally:
+        active_stage.reset(token)
 
 
 async def _generate(store, owner, question, mode, overrides, selected_id, stream_model, show_sql,
-                    parent_id, return_archive, request_id):
+                    parent_id, return_archive, request_id, trace):
     yield "status", {"message": "正在判断需要查阅的资料和数据…"}
     plan, config, has_configs = await asyncio.to_thread(query_plan, store, question, mode, selected_id)
     params = {**plan["params"], **overrides}
@@ -190,8 +193,10 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
     needs_input = False
     failed = False
     if data_needed:
+        trace.start("parameters")
         yield "status", {"message": "正在核对查询条件…"}
         if config is None:
+            trace.mark("no_connector")
             needs_input = has_configs
             notes.append("请选择要查询的数据接口。" if has_configs else "当前工作区尚未配置数据接口。")
         else:
@@ -205,26 +210,34 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
             if ambiguous:
                 missing.extend(s["label"] for s in specs if s["name"] in ambiguous and s["label"] not in missing)
             if missing:
+                trace.mark("needs_input")
                 needs_input = True
                 notes.append(plan.get("clarification", "") if ambiguous else "请补充查询条件：" + "、".join(missing) + "。")
             else:
+                trace.start("data")
                 yield "status", {"message": "正在查询业务数据…"}
                 read = ConnectorRead()
                 try:
                     citations.append(await asyncio.to_thread(data_source, config, params, read))
+                    if not citations[-1]["rows"]:
+                        trace.mark("empty")
                 except asyncio.CancelledError:
                     read.cancel()
                     raise
                 except ConnectorError as exc:
+                    trace.mark("failed")
                     failed = True
                     notes.append(f"数据接口未完成查询。{exc}")
     if docs_needed:
+        trace.start("retrieval")
         yield "status", {"message": "正在检索文档并定位相关原文…"}
         subject = retrieval.document_question(question) if intent == "mixed" else question
         docs = await asyncio.to_thread(document_sources, store, subject)
         citations.extend(docs)
         if not docs:
+            trace.mark("empty")
             notes.append("已导入的文件中未检索到足以回答这个问题的原文。")
+    trace.start("generation")
     snapshots = []
     for index, source in enumerate(citations, start=1):
         source["id"] = f"S{index}"
@@ -277,6 +290,8 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
             if selected:
                 generated.append(selected)
                 yield "delta", {"text": prefix + selected}
+        if not generated:
+            stage_note("extractive_fallback")
     if generated:
         narrative.append("".join(generated))
     else:
@@ -288,6 +303,7 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
         yield "delta", {"text": ("\n\n" if narrative else "") + note}
         narrative.append(note)
     result["answer"] = "\n\n".join(narrative)
+    trace.start("archive")
     # A disconnect can occur while SQLite is waiting for its writer lock.
     cancelled = threading.Event()
     try:

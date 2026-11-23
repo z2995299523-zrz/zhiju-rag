@@ -1,4 +1,5 @@
 import { managementNav } from "./admin.js";
+import { compareChunks } from "./chunk-compare.js";
 
 const pageSize = 25;
 
@@ -296,7 +297,9 @@ export async function renderManagement(kind, container, ctx) {
       <small>${esc(ext)} · ${esc(formatSize(d.size))}</small></div></div></td>
       <td class="mg-number">${esc(d.chunk_count ?? "—")}</td><td class="mg-time">${esc(formatDate(d.created_at))}</td>
       <td class="mg-controls"><div class="mg-doc-actions">
-        <a class="mg-read-link" href="${viewer}" target="_blank" rel="noopener" aria-label="在线查看 ${esc(d.filename)}">在线查看</a>
+        ${isImport ? `<button type="button" class="mg-compare-link" data-action="compare" data-item="${i}"
+          aria-label="分块对照 ${esc(d.filename)}">分块对照</button>` :
+          `<a class="mg-read-link" href="${viewer}" target="_blank" rel="noopener" aria-label="在线查看 ${esc(d.filename)}">在线查看</a>`}
         <a href="/api/documents/${safeRowId(d)}/download" download aria-label="下载原件 ${esc(d.filename)}">下载原件</a>
         ${isImport ? `<button type="button" class="mg-icon-btn" data-action="delete" data-item="${i}"
           title="删除文档" aria-label="删除 ${esc(d.filename)}">${icon("trash", 16)}</button>` : ""}
@@ -342,7 +345,8 @@ export async function renderManagement(kind, container, ctx) {
     area.querySelector("[data-next]")?.addEventListener("click", () => { page++; draw(); });
     area.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", () => {
       const item = visible[Number(button.dataset.item)];
-      if (button.dataset.action === "delete") confirmRemoval(shell, ctx, item, isDoc, reload);
+      if (button.dataset.action === "compare") compareChunks(shell, ctx, item, makeDialog);
+      else if (button.dataset.action === "delete") confirmRemoval(shell, ctx, item, isDoc, reload);
       else if (button.dataset.action === "edit") openEditor(shell, ctx, item, reload);
       else openTest(shell, ctx, item);
     }));
@@ -395,9 +399,14 @@ export async function renderManagement(kind, container, ctx) {
         }
         const duplicates = imported.filter(item => item.duplicate).length;
         feedback.classList.toggle("mg-warning", !!errors.length);
+        const timing = item => Number.isFinite(item?.parse_ms) ? " · 解析耗时 " + item.parse_ms + " ms" : "";
         feedback.innerHTML = `<strong>成功导入 ${imported.length - duplicates} 个文件${duplicates ? "，" + duplicates + " 个已存在" : ""}${errors.length ? "，" + errors.length + " 个失败" : ""}</strong>` +
+          (imported.length ? "<ul>" + imported.map((item, i) => `<li>${esc(item.filename)}${esc(timing(item))}
+            <button type="button" class="mg-compare-link" data-import-compare="${i}">分块对照</button></li>`).join("") + "</ul>" : "") +
           (errors.length ? "<ul>" + errors.map(error => `<li>${esc(typeof error === "string" ? error :
-            [error.filename || error.name, error.error || error.message || error.detail || "导入失败"].filter(Boolean).join(" · "))}</li>`).join("") + "</ul>" : "");
+            [error.filename || error.name, error.error || error.message || error.detail || "导入失败"].filter(Boolean).join(" · ") + timing(error))}</li>`).join("") + "</ul>" : "");
+        feedback.querySelectorAll("[data-import-compare]").forEach(button => button.addEventListener("click", () =>
+          compareChunks(shell, ctx, imported[Number(button.dataset.importCompare)], makeDialog)));
         if (retryable.length) {
           const retry = document.createElement("button");
           retry.type = "button";

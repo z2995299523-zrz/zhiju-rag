@@ -48,8 +48,8 @@ function icon(name, size = 18) {
   return `<svg class="ui-icon" aria-hidden="true" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? ""}</svg>`;
 }
 
-const pages = { ask:"知识问答", documents:"文档库", admin:"知识库概览", imports:"导入管理", connectors:"数据接口配置", models:"模型配置" };
-const managementPages = new Set(["admin", "imports", "connectors", "models"]);
+const pages = { ask:"知识问答", documents:"文档库", admin:"知识库概览", imports:"导入管理", connectors:"数据接口配置", models:"模型配置", retrieval:"检索评测" };
+const managementPages = new Set(["admin", "imports", "connectors", "models", "retrieval"]);
 const modes = { mixed:"综合查询", auto:"自动判断", documents:"文档检索", data:"接口查询" };
 const statuses = { answered:"已回答", partial:"部分回答", needs_input:"待补充", no_evidence:"缺少证据", error:"查询失败" };
 const state = {
@@ -646,6 +646,10 @@ async function route() {
   const ctx = {api, notify, canManage:canManage(), icon, esc, refresh:() => Promise.resolve()};
   try {
     if (state.page === "admin") await renderAdmin(container, ctx);
+    else if (state.page === "retrieval") {
+      const {renderRetrievalCheck} = await import("./retrieval-check.js");
+      if (container.isConnected) await renderRetrievalCheck(container, ctx);
+    }
     else if (state.page === "models") {
       const {renderModels} = await import("./model-settings.js");
       if (container.isConnected) await renderModels(container, ctx);

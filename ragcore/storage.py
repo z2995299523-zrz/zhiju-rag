@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from concurrent.futures import Future
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
@@ -24,6 +25,12 @@ def pack(value):
 
 DOC_FIELDS = "id,filename,size,sha256,chunk_count,created_at"
 CHUNK_FIELDS = "c.id,c.document_id,c.locator,c.text,d.filename,d.sha256"
+
+
+class ImportParseError(ValueError):
+    def __init__(self, message, elapsed_ms):
+        super().__init__(message)
+        self.elapsed_ms = elapsed_ms
 
 
 class RequestConflict(ValueError):
@@ -77,6 +84,11 @@ class Store:
                     created_at TEXT NOT NULL, question TEXT NOT NULL, intent TEXT NOT NULL,
                     status TEXT NOT NULL, result TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS idx_history_owner ON history(owner,id);
+                CREATE TABLE IF NOT EXISTS query_traces (
+                    id INTEGER PRIMARY KEY, started_at TEXT NOT NULL, mode TEXT NOT NULL,
+                    request_id TEXT, history_id INTEGER REFERENCES history(id), outcome TEXT NOT NULL,
+                    duration_ms REAL NOT NULL, stages TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS query_requests (
                     owner TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
                     history_id INTEGER UNIQUE REFERENCES history(id), PRIMARY KEY(owner,request_id)
@@ -127,25 +139,34 @@ class Store:
         return {**result, "duplicate": duplicate}
 
     def ingest(self, filename, content, actor):
-        chunks = parse_upload(filename, content)
+        started = time.perf_counter()
+        try:
+            chunks = parse_upload(filename, content)
+        except ValueError as exc:
+            raise ImportParseError(str(exc), round((time.perf_counter() - started) * 1000, 1)) from exc
+        parse_ms = round((time.perf_counter() - started) * 1000, 1)
         with self.db() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            return self.insert_document(conn, filename, content, chunks, actor=actor)
+            saved = self.insert_document(conn, filename, content, chunks, actor=actor)
+        return {**saved, "parse_ms": parse_ms}
 
-    def candidates(self, question, cap=180):
+    def candidates(self, question, cap=180, *, with_method=False):
         with self.db() as conn:
             count = conn.execute("SELECT coalesce(sum(chunk_count),0) FROM documents WHERE active=1").fetchone()[0]
             if count <= cap:
+                method = "all"
                 result = conn.execute(f"""SELECT {CHUNK_FIELDS} FROM chunks c JOIN documents d
                                       ON d.id=c.document_id WHERE d.active=1 ORDER BY c.id""")
             else:
+                method = "fts5"
                 query = " OR ".join('"' + t.replace('"', '""') + '"' for t in list(dict.fromkeys(index_terms(question)))[:160])
                 if not query:
-                    return []
+                    return ([], method) if with_method else []
                 result = conn.execute(f"""SELECT {CHUNK_FIELDS} FROM chunk_index
                     JOIN chunks c ON c.id=chunk_index.rowid JOIN documents d ON d.id=c.document_id
                     WHERE chunk_index MATCH ? AND d.active=1 ORDER BY rank LIMIT ?""", (query, cap))
-            return [dict(row) for row in result]
+            chunks = [dict(row) for row in result]
+            return (chunks, method) if with_method else chunks
 
     def connectors(self):
         with self.db() as conn:

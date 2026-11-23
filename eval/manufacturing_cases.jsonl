@@ -1,2 +1,2 @@
-{"id":"equipment-handover","mode":"documents","question":"设备交接记录需要填写哪些内容？","expect":{"intent":"documents","status":"answered","files":["设备交接记录说明.md"],"contains":["设备编号","交接日期","交接双方","附件清单"]}}
+{"id":"equipment-handover","mode":"documents","question":"设备交接记录需要填写哪些内容？","expect":{"intent":"documents","status":"answered","files":["设备交接记录说明.md"],"contains":["设备编号","交接日期","交接双方","附件清单"]},"evidence":[{"filename":"设备交接记录说明.md","sha256":"bcca37f565208ddc15722c9ec2636d57f898d8916e66f55ab803e6352286c2d2","locator":"第 3–4 行"}]}
 {"id":"unrelated-rule","mode":"documents","question":"差旅报销的住宿限额是多少？","expect":{"intent":"documents","status":"no_evidence","kinds":[]}}

@@ -126,7 +126,7 @@ def service_state(port):
         schema = response_json(port, "/api/openapi.json")
         paths = schema.get("paths", {})
         required = {"/api/query", "/api/query/stream", "/api/query/examples", "/api/admin/models",
-                    "/api/documents", "/api/documents/{doc_id}/preview"}
+                    "/api/documents", "/api/documents/{doc_id}/preview", "/api/admin/retrieval/evaluate"}
         if (schema.get("info", {}).get("title") == "企业知识检索工作台" and required.issubset(paths)
                 and supports_embedded_reader(port)):
             return "ready"

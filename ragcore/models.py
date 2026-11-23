@@ -19,6 +19,7 @@ from urllib import error, request
 
 import httpx
 from .model_config import ConfigError, Settings as _Settings, effective as _settings
+from .query_trace import stage_note
 
 
 def model_enabled() -> bool:
@@ -183,6 +184,7 @@ def refine_route(question: str, configs: list[dict], route: dict, mode: str = "a
         return {"intent": intent, "connector_id": connector_id, "params": params, "missing": missing,
                 "reason": f"模型匹配数据接口「{config.get('name', '')}」，参数已校验"}
     except _MODEL_ERRORS:
+        stage_note("local_route_fallback")
         return route
 
 
@@ -423,6 +425,7 @@ def semantic_rank(question: str, chunks: list[dict], limit: int = 5) -> list[dic
     if not chunks or not question.strip() or limit < 1:
         return []
     if not _VECTOR_LOCK.acquire(timeout=0.05):
+        stage_note("embedding_busy")
         return None
     try:
         candidates = [c for c in chunks if str(c.get("text") or "").strip()]
@@ -442,6 +445,7 @@ def semantic_rank(question: str, chunks: list[dict], limit: int = 5) -> list[dic
         ranked.sort(key=lambda c: c["score"], reverse=True)
         return ranked[:limit]
     except _MODEL_ERRORS:
+        stage_note("lexical_fallback")
         return None
     finally:
         _VECTOR_LOCK.release()

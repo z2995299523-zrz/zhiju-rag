@@ -95,6 +95,9 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual([name for name, _ in events][-2:], ["delta", "error"])
         self.assertNotIn("provider stream stopped", events[-1][1]["message"])
         self.assertEqual(self.ok(self.client.get("/api/history")), [])
+        failure, = self.ok(self.client.get("/api/admin/query-traces"))["items"]
+        self.assertEqual((failure["outcome"], failure["history_id"]), ("error", None))
+        self.assertEqual((failure["stages"][-1]["name"], failure["stages"][-1]["status"]), ("generation", "failed"))
 
     def test_request_id_recovers_lost_done_and_serializes_concurrent_retries(self):
         payload = {"request_id": str(uuid4()), "question":"科研项目经费报销需要哪些材料？", "mode":"documents"}
@@ -193,6 +196,10 @@ class WorkflowTests(unittest.TestCase):
             asyncio.run(disconnect_after_delta())
         self.assertTrue(closed.is_set())
         self.assertEqual(self.ok(self.client.get("/api/history")), [])
+        interrupted, = self.ok(self.client.get("/api/admin/query-traces"))["items"]
+        self.assertEqual((interrupted["outcome"], interrupted["history_id"]), ("stopped", None))
+        self.assertEqual(interrupted["stages"][-1]["name"], "generation")
+        self.assertEqual(interrupted["stages"][-1]["status"], "stopped")
 
     def test_seeded_questions_return_checkable_evidence(self):
         doc = self.ask("科研项目经费报销需要哪些材料？")

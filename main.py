@@ -25,9 +25,11 @@ from ragcore.connectors import ConnectorError, execute, validate_config
 from ragcore.documents import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS
 from ragcore.engine import answer_query, display_fields, query_events, query_examples, workspace_answer
 from ragcore.model_secrets import CredentialError
+from ragcore.query_trace import recent_traces
 from ragcore.ocr import IMAGE_EXTENSIONS, available as ocr_available
 from ragcore.preview import router as preview_router
-from ragcore.storage import DOC_FIELDS, RequestConflict, Store, pack, validate_parent
+from ragcore.retrieval_check import router as retrieval_check_router
+from ragcore.storage import DOC_FIELDS, ImportParseError, RequestConflict, Store, pack, validate_parent
 from ragcore.workspace_id import workspace_id
 
 
@@ -101,10 +103,11 @@ def create_app(data_dir=None, seed=None):
         instance.state.workspace_id = workspace_id(store.path.parent)
         yield
 
-    app = FastAPI(title="企业知识检索工作台", version="1.2.0", docs_url=None, redoc_url=None,
+    app = FastAPI(title="企业知识检索工作台", version="1.3.0", docs_url=None, redoc_url=None,
                   openapi_url="/api/openapi.json", lifespan=lifespan)
     app.middleware("http")(access.guard)
     app.include_router(preview_router)
+    app.include_router(retrieval_check_router)
 
     @app.exception_handler(ConnectorError)
     async def connector_error(request, exc):
@@ -147,6 +150,11 @@ def create_app(data_dir=None, seed=None):
             return {"documents": docs, "chunks": chunks,
                     "connectors": conn.execute("SELECT count(*) FROM connectors").fetchone()[0],
                     "queries": conn.execute("SELECT count(*) FROM history").fetchone()[0]}
+
+    @app.get("/api/admin/query-traces")
+    def query_traces(request: Request, actor=Depends(access.admin), limit: int = Query(10, ge=1, le=50),
+                     before: int | None = Query(None, ge=1, le=2**63 - 1)):
+        return recent_traces(request.app.state.store, before, limit)
 
     @app.get("/api/admin/models")
     def model_settings(request: Request, actor=Depends(access.admin)):
@@ -201,7 +209,10 @@ def create_app(data_dir=None, seed=None):
                     result = await run_in_threadpool(request.app.state.store.ingest, filename, content, access.audit_actor(actor))
                     imported.append(result)
                 except ValueError as exc:
-                    errors.append({"filename": filename, "error": str(exc), "message": str(exc)})
+                    error = {"filename": filename, "error": str(exc), "message": str(exc)}
+                    if isinstance(exc, ImportParseError):
+                        error["parse_ms"] = exc.elapsed_ms
+                    errors.append(error)
         return {"imported": imported, "errors": errors}
 
     @app.delete("/api/documents/{doc_id}")

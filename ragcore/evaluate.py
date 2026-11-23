@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from .engine import answer_query
+from .retrieval import observe_rankings, score_evidence, validate_evidence_labels
 from .storage import Store
 
 
@@ -46,12 +47,40 @@ def evidence_errors(store, result):
     return errors
 
 
-def check_case(store, case, names):
+def assess_retrieval(store, case, rankings, top_k):
+    expect = case["expect"]
+    if "evidence" not in case:
+        reason = ("data_only" if expect["intent"] == "data" else
+                  "no_positive_evidence" if expect["status"] == "no_evidence" else "unlabeled")
+        return {"status": "skipped", "reason": reason}, []
+    if expect["intent"] not in {"documents", "mixed"}:
+        raise ValueError("预期文档依据只适用于文档或综合查询")
+    labels = case["evidence"]
+    validate_evidence_labels(labels)
+    # Typos, obsolete document versions or stale locators are annotation errors.
+    # These must not lower first-stage recall for an otherwise valid corpus.
+    columns = {"filename": "d.filename", "sha256": "d.sha256", "locator": "c.locator", "chunk_id": "c.id"}
+    with store.db() as conn:
+        for label in labels:
+            where = " AND ".join(columns[key] + "=?" for key in label)
+            found = conn.execute(f"""SELECT 1 FROM documents d JOIN chunks c ON c.document_id=d.id
+                                     WHERE d.active=1 AND {where} LIMIT 1""", tuple(label.values())).fetchone()
+            if not found:
+                return {"status": "invalid_label", "expected": label}, [f"预期依据在当前工作区找不到 {label!r}"]
+    if len(rankings) != 1:
+        return {"status": "not_measured"}, [f"已标注问题实际执行了 {len(rankings)} 次文档检索"]
+    metrics = score_evidence(rankings[0], labels, top_k)
+    errors = [f"{entry['stage']} {entry['expected']!r}" for entry in metrics["evidence"] if entry["stage"] != "hit"]
+    return {"status": "measured", **metrics}, errors
+
+
+def evaluate_case(store, case, names, top_k):
     expect = case["expect"]
     if "intent" not in expect or "status" not in expect:
         raise ValueError("expect needs intent and status")
-    response = answer_query(store, "offline-evaluation", case["question"], case.get("mode", "auto"),
-                            case.get("params", {}), None)
+    with observe_rankings() as rankings:
+        response = answer_query(store, "offline-evaluation", case["question"], case.get("mode", "auto"),
+                                case.get("params", {}), None)
     sources = response["citations"]
     actual = {
         "intent": response["intent"], "status": response["status"], "params": response["params"],
@@ -67,16 +96,37 @@ def check_case(store, case, names):
             raise ValueError(f"unknown expected field {key!r}")
         elif actual[key] != (sorted(wanted) if key in {"kinds", "files"} else wanted):
             errors.append(f"{key} expected {wanted!r}, got {actual[key]!r}")
+    metrics, retrieval_errors = assess_retrieval(store, case, rankings, top_k)
+    return errors + retrieval_errors, metrics
+
+
+def check_case(store, case, names):
+    errors, _ = evaluate_case(store, case, names, top_k=3)
     return errors
+
+
+def summarize_retrieval(cases, top_k):
+    measured = [case["retrieval"] for case in cases if case["retrieval"]["status"] == "measured"]
+    total = sum(item["expected"] for item in measured)
+    candidate_hits = sum(item["candidate_hits"] for item in measured)
+    top_k_hits = sum(item["top_k_hits"] for item in measured)
+    return {"measured_cases": len(measured), "other_cases": len(cases) - len(measured), "expected": total,
+            "candidate_hits": candidate_hits, "top_k_hits": top_k_hits, "top_k": top_k,
+            "candidate_recall": candidate_hits / total if total else None,
+            "top_k_recall": top_k_hits / total if total else None}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cases", type=Path, default=DEFAULT_CASES, help="UTF-8 JSONL case file")
     parser.add_argument("--profile", default="research-finance", help="Industry profile name or JSON file")
+    parser.add_argument("--top-k", type=int, default=3, help="Evaluate this many positions after ranking (default 3)")
+    parser.add_argument("--report", type=Path, help="Write a UTF-8 JSON report with per-case metrics and evidence ranks")
     args = parser.parse_args()
+    if not 1 <= args.top_k <= 180:
+        parser.error("--top-k must be between 1 and 180")
     lines = args.cases.read_text(encoding="utf-8-sig").splitlines()
-    passed = failed = 0
+    cases = []
     with TemporaryDirectory() as directory, patch.dict(os.environ, {
         "RAG_LLM_BASE_URL": "", "RAG_EMBED_BASE_URL": "", "RAG_INDUSTRY_PROFILE": args.profile,
     }):
@@ -93,15 +143,31 @@ def main():
             try:
                 case = json.loads(raw)
                 identifier = case["id"]
-                errors = check_case(store, case, names)
+                errors, metrics = evaluate_case(store, case, names, args.top_k)
             except Exception as exc:
                 errors = [f"{type(exc).__name__} {exc}"]
+                metrics = {"status": "not_measured"}
+            cases.append({"id": identifier, "passed": not errors, "errors": errors, "retrieval": metrics})
             if errors:
-                failed += 1
                 print(f"FAIL {identifier}  " + " | ".join(errors))
             else:
-                passed += 1
                 print(f"PASS {identifier}")
+            if metrics["status"] == "measured":
+                print(f"  候选召回 {metrics['candidate_hits']}/{metrics['expected']} ({metrics['candidate_method']})"
+                      f"  重排 Top-{args.top_k} {metrics['top_k_hits']}/{metrics['expected']} ({metrics['ranking_method']})")
+            else:
+                print("  文档检索未计分 " + metrics.get("reason", metrics["status"]))
+    summary = summarize_retrieval(cases, args.top_k)
+    if summary["expected"]:
+        print(f"候选召回率 {summary['candidate_recall']:.1%}  重排 Top-{args.top_k} 召回率 {summary['top_k_recall']:.1%}"
+              f"  已计分 {summary['measured_cases']} 题，{summary['expected']} 项依据；未计分 {summary['other_cases']} 题")
+    else:
+        print("无可计分的文档依据，候选召回率和重排召回率均为 N/A")
+    passed = sum(case["passed"] for case in cases)
+    failed = len(cases) - passed
+    if args.report:
+        report = {"profile": args.profile, "passed": passed, "failed": failed, "retrieval": summary, "cases": cases}
+        args.report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(f"Passed {passed} / {passed + failed}   Failed {failed}")
     if passed + failed == 0:
         print("No evaluation cases supplied.", file=sys.stderr)
