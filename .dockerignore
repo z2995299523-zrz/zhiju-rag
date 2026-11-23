@@ -1,0 +1,13 @@
+**
+!Dockerfile
+!requirements.txt
+!requirements-ocr.txt
+!main.py
+!ragcore/
+!ragcore/*.py
+!profiles/
+!profiles/*.json
+!eval/
+!eval/*.jsonl
+!web/
+!web/**

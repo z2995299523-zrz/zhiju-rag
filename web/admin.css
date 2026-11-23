@@ -1,0 +1,86 @@
+.adm-page {
+  --adm-line: var(--line, #dce3e2);
+  --adm-ink: var(--ink, #283434);
+  --adm-muted: var(--muted, #536666);
+  --adm-accent: var(--teal, #275d60);
+  color: var(--adm-ink);
+  width: min(100%, 960px);
+  min-width: 0;
+}
+.adm-title, .adm-panel > header, .adm-panel > header a,
+.adm-metric > span, .adm-row, .adm-pagination { display: flex; align-items: center; }
+.adm-title { justify-content: space-between; gap: 18px; flex-wrap: wrap; margin-bottom: 24px; }
+.adm-title h1 { margin: 0; font-size: clamp(23px, 2.2vw, 29px); letter-spacing: -.025em; font-weight: 680; line-height: 1.3; }
+.adm-page a { text-decoration: none; }
+.adm-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-bottom: 1px solid var(--adm-line); background: #fff; padding: 0 0 20px; }
+.adm-metric { padding: 0 clamp(14px, 2vw, 28px); min-width: 0; }
+.adm-metric + .adm-metric { border-left: 1px solid var(--adm-line); }
+.adm-metric > span { color: var(--adm-muted); gap: 6px; font-size: 13px; white-space: nowrap; }
+.adm-metric strong { display: block; font-size: clamp(23px, 2.3vw, 30px); font-variant-numeric: tabular-nums; line-height: 1.35; margin-top: 7px; letter-spacing: -.035em; overflow-wrap: anywhere; }
+.adm-metric small { font-size: 12px; font-weight: 500; margin-left: 6px; color: var(--adm-muted); }
+.adm-panels { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); align-items: start; gap: 32px; margin-top: 18px; }
+.adm-panel { min-width: 0; background: #fff; overflow: hidden; }
+.adm-panel > header { justify-content: space-between; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--adm-line); color: var(--adm-muted); }
+.adm-panel h2 { margin: 0; color: var(--adm-ink); font-size: 16px; font-weight: 650; }
+.adm-panel > header a { color: var(--adm-accent); gap: 4px; font-weight: 600; font-size: 12px; }
+.adm-row { gap: 12px; padding: 14px 4px; color: var(--adm-muted); min-width: 0; }
+.adm-row + .adm-row { border-top: 1px solid var(--adm-line); }
+.adm-row:hover { background: #f5f7f7; }
+.adm-row > svg { flex: none; }
+.adm-symbol { display: grid; place-items: center; width: 31px; height: 34px; border-radius: 6px; background: #f0f5f4; color: var(--adm-accent); flex: none; }
+.adm-row-text { display: grid; min-width: 0; flex: 1; gap: 4px; }
+.adm-row strong { color: var(--adm-ink); font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.adm-row small, .adm-query-status { font-size: 12px; font-weight: 400; color: var(--adm-muted); }
+.adm-query-status { flex: none; }
+.adm-note { grid-column: 1 / -1; margin: 0; padding: 18px 20px; color: var(--adm-muted); font-size: 13px; overflow-wrap: anywhere; }
+.adm-pagination { justify-content: flex-end; gap: 8px; border-top: 1px solid var(--adm-line); padding: 12px 18px; }
+.adm-pagination span { margin-right: auto; color: var(--adm-muted); font-size: 12px; }
+.adm-pagination button, .adm-note button { color: var(--adm-ink); background: #fff; border: 1px solid var(--adm-line); border-radius: 6px; font: inherit; font-size: 12px; padding: 5px 9px; }
+.adm-pagination button:hover:enabled, .adm-note button:hover { background: #f0f5f4; }
+.adm-pagination button:disabled { opacity: .45; }
+@media (max-width: 860px) {
+  .adm-panels { grid-template-columns: 1fr; }
+}
+@media (max-width: 580px) {
+  .adm-stats { grid-template-columns: repeat(2, minmax(0,1fr)); padding: 0; }
+  .adm-metric { padding: 14px; }
+  .adm-metric:nth-child(3) { border-left: none; }
+  .adm-metric:nth-child(n+3) { border-top: 1px solid var(--adm-line); }
+  .adm-title { gap: 10px; margin-bottom: 15px; }
+  .adm-panel > header, .adm-row { padding: 13px 4px; }
+}
+
+
+.adm-nav { display: flex; gap: clamp(12px, 3vw, 28px); align-items: stretch; border-bottom: 1px solid var(--line, #dce3e2); margin: 0 0 24px; }
+.adm-nav a { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; font-size: 14px; white-space: nowrap; margin-bottom: -1px; color: var(--muted, #536666); border-bottom: 2px solid transparent; }
+.adm-nav a:hover, .adm-nav a[aria-current] { color: var(--teal, #275d60); }
+.adm-nav a[aria-current] { font-weight: 650; border-color: currentColor; }
+.adm-page :where(button, a):focus-visible { outline: 2px solid var(--adm-accent); outline-offset: 2px; }
+.adm-page .adm-panel { padding: 3px; }
+
+.model-configurations { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(20px, 3vw, 38px); align-items: start; }
+.model-form, .model-form fieldset { min-width: 0; }
+.model-form fieldset { margin: 0; border: 0; padding: 0; }
+.model-form legend { padding: 0; font-size: 18px; font-weight: 650; }
+.model-purpose, .model-help, .model-current span, .model-feedback { color: var(--adm-muted); font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
+.model-purpose { margin: 5px 0 14px; }
+.model-current { display: grid; gap: 3px; margin-bottom: 16px; padding: 10px 12px; background: var(--paper); border-left: 2px solid var(--adm-line); }
+.model-current strong { font-size: 13px; font-weight: 650; }
+.model-field { display: grid; gap: 5px; margin-top: 12px; color: var(--adm-ink); font-size: 13px; font-weight: 600; }
+.model-field :is(select,input) { width: 100%; min-width: 0; min-height: 38px; padding: 6px 10px; border: 1px solid var(--adm-line); border-radius: 6px; background: white; color: var(--adm-ink); font-weight: 400; }
+.model-field input:disabled { background: var(--paper); }
+.model-help { margin-top: 7px; }
+.model-remove { display: flex; align-items: center; gap: 6px; min-height: 36px; font-size: 13px; color: var(--adm-muted); }
+.model-remove input { accent-color: var(--adm-accent); }
+.model-actions { display: flex; gap: 8px; margin-top: 16px; }
+.model-feedback:not(:empty) { margin-top: 9px; color: var(--adm-accent); }
+.model-feedback.error { color: #8a4037; }
+@media (max-width: 960px) {
+  .model-configurations { grid-template-columns: 1fr; }
+  .model-form + .model-form { padding-top: 20px; border-top: 1px solid var(--adm-line); }
+}
+@media (max-width: 560px) {
+  .adm-nav { flex-wrap: wrap; column-gap: 12px; }
+  .model-field :is(input,select) { min-height: 44px; font-size: 16px; }
+  .model-actions button, .model-remove { min-height: 44px; }
+}

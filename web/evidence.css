@@ -1,0 +1,106 @@
+:root {
+  --ev-ink: #293335;
+  --ev-muted: #59676a;
+  --ev-teal: #2d696b;
+  --ev-line: #dce3e3;
+  --ev-tint: #eef5f4;
+}
+.ev-cite.inline-cite {
+  display: inline; font-family: inherit; font-size: .82em; line-height: 1.15;
+  font-weight: 650; color: var(--ev-teal); border: 0; background: var(--ev-tint); border-radius: 4px;
+  vertical-align: baseline; padding: 2px 5px; margin: 0 2px; cursor: pointer; white-space: nowrap;
+}
+.ev-cite.inline-cite:hover, .ev-cite.inline-cite[aria-expanded="true"] { background: #dcece9; }
+.answer-copy :is(p,li):has(.ev-cite[aria-expanded="true"]) {
+  background: #edf5f1; border-radius: 3px; box-shadow: -3px 0 #66938c;
+}
+.ev-cite:focus-visible, .ev-panel :focus-visible, .ev-preview :focus-visible {
+  outline: 2px solid var(--ev-teal); outline-offset: 3px;
+}
+.ev-missing-cite { color: var(--ev-muted); font-size: .88em; }
+.ev-panel, .ev-preview {
+  box-sizing: border-box; background: #fff; color: var(--ev-ink); font: inherit;
+  padding: 0; max-height: none; max-width: none; overflow: hidden;
+}
+.ev-panel:not([open]), .ev-preview:not([open]) { display: none; }
+.ev-panel[open] {
+  display: flex; flex-direction: column; position: fixed; inset: 0; margin: auto;
+  width: min(580px, calc(100% - 32px)); height: fit-content;
+  max-height: min(680px, calc(100dvh - 32px)); border: 1px solid var(--ev-line); border-radius: 12px;
+  box-shadow: 0 12px 44px rgb(27 42 42 / 14%);
+}
+.ev-panel::backdrop, .ev-preview::backdrop { background: rgb(27 42 42 / 26%); }
+.ev-head, .ev-preview-head {
+  min-height: 58px; flex: none; display: flex; align-items: center; gap: 9px;
+  padding: 8px 18px 8px 23px; border-bottom: 1px solid var(--ev-line);
+}
+.ev-head h2, .ev-preview-head h2 { margin: 0; color: var(--ev-ink); font-size: 17px; font-weight: 650; line-height: 1.4; }
+.ev-count { color: var(--ev-muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.ev-close {
+  display: grid; place-items: center; flex: none; width: 40px; height: 40px; cursor: pointer;
+  color: var(--ev-muted); background: transparent; border: 0; margin-left: auto; border-radius: 6px;
+}
+.ev-close:hover { color: var(--ev-teal); background: var(--ev-tint); }
+.ev-content { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 5px 22px 20px; }
+.ev-source { padding-inline: 1px; border-bottom: 1px solid var(--ev-line); }
+.ev-source:last-child { border-bottom: 0; }
+.ev-source > summary {
+  display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 8px 8px;
+  padding: 21px 0 15px; list-style: none; cursor: pointer; line-height: 1.5;
+}
+.ev-source summary::-webkit-details-marker { display: none; }
+.ev-source > summary:focus-visible { outline-offset: -2px; border-radius: 3px; }
+.ev-source summary strong { font-size: 15px; font-weight: 650; color: var(--ev-ink); overflow-wrap: anywhere; }
+.ev-kind { display: inline-flex; align-items: center; gap: 7px; color: var(--ev-muted); font-size: 12px; }
+.ev-kind svg { color: var(--ev-teal); }
+.ev-number { justify-self: end; color: var(--ev-teal); font: 600 12px/1.8 Consolas, monospace; }
+.ev-chevron { display: flex; justify-content: flex-end; color: var(--ev-muted); }
+.ev-source[open] .ev-chevron svg { transform: rotate(180deg); }
+.ev-source summary:hover strong { color: var(--ev-teal); }
+.ev-card-body { padding: 0 0 20px; overflow-wrap: anywhere; }
+.ev-card-body .ev-locator { font-size: 12px; line-height: 1.5; margin: 0 0 13px; color: var(--ev-muted); }
+.ev-card-body blockquote {
+  color: #364244; background: #f6f8f8; border: 0; border-left: 2px solid #87aeac; margin: 0 0 12px;
+  padding: 11px 13px; font-size: 14px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ev-card-body blockquote mark { color: inherit; background: #e3eeea; }
+.ev-records pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
+.ev-read {
+  display: inline-flex; align-items: center; gap: 7px; color: var(--ev-teal); text-decoration: none;
+  min-height: 36px; font-size: 13px; font-weight: 600; padding: 0 2px;
+}
+.ev-read:hover, .ev-downloads button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.ev-missing { color: var(--ev-muted); font-size: 13px; line-height: 1.7; }
+.ev-api-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 16px; font-size: 13px; line-height: 1.65; margin: 0; }
+.ev-api-meta dt { color: var(--ev-muted); font-size: 12px; }
+.ev-api-meta dd { margin: 0; min-width: 0; }
+.ev-filter { display: inline-block; padding: 2px 8px; background: #f3f6f6; border-radius: 4px; margin: 1px 5px 2px 0; }
+.ev-records { margin-top: 14px; font-size: 13px; }
+.ev-records summary { color: var(--ev-teal); cursor: pointer; }
+.ev-records dl { border-left: 2px solid #b5cbc9; padding-left: 11px; margin: 11px 0; }
+.ev-records dl > div { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
+.ev-records dt { color: var(--ev-muted); }
+.ev-records dd { margin: 0; text-align: right; }
+.ev-downloads { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 12px; }
+.ev-downloads button { border: 0; background: transparent; color: var(--ev-teal); cursor: pointer; font: inherit; padding: 5px 0; }
+.ev-download-status { margin: 6px 0 0; color: var(--ev-muted); font-size: 12px; line-height: 1.65; }
+.ev-download-status:empty { display: none; }
+.ev-preview[open] {
+  display: flex; flex-direction: column; position: fixed; inset: 0; margin: auto;
+  width: min(1060px, calc(100% - 64px)); height: min(92dvh, 940px);
+  border: 1px solid #c5d0cf; border-radius: 9px; overscroll-behavior: contain;
+}
+.ev-preview-head { min-height: 52px; }
+.ev-preview-head h2 { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; }
+.ev-preview-head h2 svg { color: var(--ev-teal); }
+.ev-preview-head .ev-read { margin-left: auto; }
+.ev-preview-head .ev-close { margin-left: 0; }
+.ev-preview-notice { padding: 16px 24px; color: var(--ev-muted); }
+.ev-preview iframe { border: 0; width: 100%; min-height: 0; flex: 1; background: #fff; }
+@media (max-width: 600px) {
+  .ev-close { width: 44px; height: 44px; }
+  .ev-head { min-height: 57px; padding-inline: 17px 9px; }
+  .ev-content { padding-inline: 16px; padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+  .ev-preview[open] { width: 100%; height: 100%; height: 100dvh; border: 0; border-radius: 0; }
+  .ev-preview-head { padding: 3px 10px 3px 16px; }
+}

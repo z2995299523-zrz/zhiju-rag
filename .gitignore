@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+.venv/
+var/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.sqlite3*
+验收截图/
+.codex/
+.agents/
+.aws/
+.model-credentials.key
+.model-key-*
+*.pem
+*.key

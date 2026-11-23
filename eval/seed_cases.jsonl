@@ -1,0 +1,15 @@
+{"id":"expense-materials","question":"科研项目经费报销需要哪些材料？","expect":{"intent":"documents","status":"answered","kinds":["document"],"files":["科研项目经费报销指引.md"],"contains":["报销申请单","验收单","支付凭证"]}}
+{"id":"expense-approval","question":"科研项目的报销由谁审核？","expect":{"intent":"documents","status":"answered","kinds":["document"],"files":["科研项目经费报销指引.md"],"contains":["项目负责人","财务人员复核"]}}
+{"id":"expense-paraphrase","question":"采购类支出报账要附什么？","expect":{"intent":"documents","status":"answered","kinds":["document"],"files":["科研项目经费报销指引.md"],"contains":["采购合同","验收单"]}}
+{"id":"zero-denominator","question":"年度预算为零时怎么计算预算执行率？","expect":{"intent":"documents","status":"answered","kinds":["document"],"files":["预算执行口径说明.md"],"contains":["年度预算为零时，执行率不适用"]}}
+{"id":"budget-formula","question":"预算执行率是怎么算的？","expect":{"intent":"documents","status":"answered","kinds":["document"],"files":["预算执行口径说明.md"],"contains":["已执行金额 ÷ 年度预算金额"]}}
+{"id":"budget-materials-2026","question":"2026年材料研发平台的预算执行率是多少？","expect":{"intent":"data","status":"answered","connector":"科研预算查询","params":{"project":"材料研发平台","year":2026},"kinds":["api"],"contains":["75%","900 万元","1200 万元"]}}
+{"id":"budget-manufacturing-2026","question":"2026年智能制造项目预算执行率是多少？","expect":{"intent":"data","status":"answered","connector":"科研预算查询","params":{"project":"智能制造项目","year":2026},"kinds":["api"],"contains":["60%","480 万元"]}}
+{"id":"budget-no-rows","question":"2025年智能制造项目的预算执行率是多少？","expect":{"intent":"data","status":"no_evidence","connector":"科研预算查询","params":{"project":"智能制造项目","year":2025},"kinds":["api"],"contains":["0 条记录"]}}
+{"id":"mixed-data-definition","question":"材料研发平台 2026 年预算执行率是多少，按什么口径计算？","expect":{"intent":"mixed","status":"answered","connector":"科研预算查询","params":{"project":"材料研发平台","year":2026},"kinds":["api","document"],"files":["预算执行口径说明.md"],"contains":["75%","调整后的批准预算"]}}
+{"id":"ambiguous-years","question":"材料研发平台 2025 年和 2026 年预算执行率对比","expect":{"intent":"data","status":"needs_input","connector":"科研预算查询","params":{"project":"材料研发平台"},"missing":["年度"],"kinds":[]}}
+{"id":"ambiguous-projects","question":"对比材料研发平台与智能制造项目2026年预算执行率","expect":{"intent":"data","status":"needs_input","connector":"科研预算查询","params":{"year":2026},"missing":["项目名称"],"kinds":[]}}
+{"id":"resolved-year","question":"材料研发平台 2025 年和 2026 年预算执行率对比","params":{"year":2026},"expect":{"intent":"data","status":"answered","connector":"科研预算查询","params":{"project":"材料研发平台","year":2026},"kinds":["api"],"contains":["75%"]}}
+{"id":"unknown-reimbursement-limit","question":"科研项目经费报销每人每天上限是多少？","mode":"documents","expect":{"intent":"documents","status":"no_evidence","kinds":[]}}
+{"id":"document-lacks-actual","question":"2026年材料研发平台的预算执行率是多少？","mode":"documents","expect":{"intent":"documents","status":"no_evidence","kinds":[]}}
+{"id":"outside-corpus","question":"水星到太阳有多远？","expect":{"intent":"documents","status":"no_evidence","kinds":[]}}

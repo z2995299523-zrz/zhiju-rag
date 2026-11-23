@@ -1,0 +1,39 @@
+services:
+  rag:
+    build:
+      context: .
+      args:
+        WITH_OCR: ${RAG_OCR_ENABLED:-0}
+    ports:
+      - "127.0.0.1:8781:8781"
+    volumes:
+      - workspace:/app/var
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      RAG_DATA_DIR: /app/var
+      RAG_ADMIN_PASSWORD: ${RAG_ADMIN_PASSWORD:?Set RAG_ADMIN_PASSWORD before starting the service}
+      RAG_READER_PASSWORD: ${RAG_READER_PASSWORD:-}
+      RAG_INDUSTRY_PROFILE: ${RAG_INDUSTRY_PROFILE:-}
+      RAG_SEED_DEMO: ${RAG_SEED_DEMO:-0}
+      RAG_COOKIE_SECURE: ${RAG_COOKIE_SECURE:-0}
+      RAG_OCR_ENABLED: ${RAG_OCR_ENABLED:-0}
+      RAG_ALLOWED_HOSTS: ${RAG_ALLOWED_HOSTS:-}
+      RAG_ALLOW_PRIVATE_NETWORK: ${RAG_ALLOW_PRIVATE_NETWORK:-0}
+      RAG_LLM_BASE_URL: ${RAG_LLM_BASE_URL:-}
+      RAG_LLM_MODEL: ${RAG_LLM_MODEL:-}
+      RAG_LLM_API_KEY: ${RAG_LLM_API_KEY:-}
+      RAG_EMBED_BASE_URL: ${RAG_EMBED_BASE_URL:-}
+      RAG_EMBED_MODEL: ${RAG_EMBED_MODEL:-}
+      RAG_EMBED_API_KEY: ${RAG_EMBED_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8781/healthz', timeout=3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  workspace:

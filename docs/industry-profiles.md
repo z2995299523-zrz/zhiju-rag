@@ -1,0 +1,46 @@
+# 用同一标准版交付不同的行业工作区
+
+每个部署使用独立的数据目录、管理员账号和模型配置。同一个程序版本可以服务不同客户。行业模板在数据库首次创建时导入一次，之后通过管理后台维护文档、业务接口和模型。给已有数据库更换模板变量不会重新导入或覆盖已有内容。
+
+| 首次启动时的 `RAG_INDUSTRY_PROFILE` | 自带内容 | 适用路径 |
+| --- | --- | --- |
+| `standard`（默认） | 空文档库、空接口清单 | 直接导入自己的资料并接入业务系统 |
+| `research-finance` | 科研报销与预算口径示例、内置预算演示接口、三类问题 | 演示文档问答、业务查数和综合查询 |
+| `manufacturing` | 设备交接说明和文档问题 | 演示制造业制度查询，接入企业设备接口后可查数 |
+| JSON 文件路径 | 由实施方选择初始文档、接口和问题 | 使用本企业已确认的术语、资料和指标 |
+
+## 在 Windows 上单独启动制造业工作区
+
+```powershell
+$env:RAG_DATA_DIR = 'D:\ZhijuData\manufacturing'
+$env:RAG_INDUSTRY_PROFILE = 'manufacturing'
+.\start.cmd --port 8791
+```
+
+在服务进程启动前设置环境变量。启动器按数据目录识别实例。Docker 可把行业 JSON 只读挂载到容器，将 `RAG_INDUSTRY_PROFILE` 设为容器内路径，并为每个部署配置独立数据卷与端口。旧部署只设置 `RAG_SEED_DEMO=1` 时仍会在新库中导入科研财务模板；显式的行业选择优先。
+
+## 编写行业模板
+
+以[制造设备模板](../profiles/manufacturing.json)或[科研财务模板](../profiles/research-finance.json)为起点。JSON 使用 UTF-8，文件最大 2 MiB。路径可以是绝对路径；相对路径以项目根目录为起点。
+
+| 字段 | 内容 |
+| --- | --- |
+| `name` | 行业工作区模板名称 |
+| `documents` | 以文件名为键、UTF-8 文本为值的对象，支持 MD、TXT、CSV、TSV、JSON 和 JSONL。PDF、Office 和扫描件可启动后从「导入管理」上传 |
+| `connectors` | 只读业务接口定义的数组，字段和管理后台相同。真实接口的主机与端口须先列入 `RAG_ALLOWED_HOSTS`。需要凭据时，模板里只填 `token_env` 指向的环境变量名 |
+| `examples` | 每种模式至多一题。`documents` 绑定 `document` 文件名，`data` 绑定 `connector` 名称，`mixed` 同时绑定两者。问题正文写在 `question` |
+
+模板加载失败会回滚本次导入。修正文件后用相同数据目录重启即可重试。模板问题依赖对应版本的来源；文档换版、接口定义变化或新增来源后，首页可按实际接入内容生成问题。
+
+## 验收与交付
+
+在「管理后台 → 模型配置」分别设置对话与向量模型。行业之间可以共用模型服务，也可分别部署。本地检索、引用回放和只读接口可以独立工作。对话、向量模型会接收的内容以及密钥迁移方式见[项目说明](../README.md)。
+
+每个行业应准备输入问题、预期引用位置、指标定义和预期数值。使用同一个应用版本和对应模板执行离线回归，再用真实业务接口核对同一组筛选条件。
+
+```sh
+python -m ragcore.evaluate
+python -m ragcore.evaluate --profile manufacturing --cases eval/manufacturing_cases.jsonl
+```
+
+离线评测使用临时数据库。自定义评测可将 `--profile` 设为自有模板 JSON 的路径，将 `--cases` 设为对应题集。涉及真实 HTTP 业务接口的验收应在独立测试部署执行，核对实际鉴权、指标单位、数据范围和返回记录。
