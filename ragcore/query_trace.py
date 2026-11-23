@@ -18,6 +18,13 @@ def stage_note(code):
         stage["notes"].append(code)
 
 
+def stage_metrics(**values):
+    """Stage diagnostics use counters, timings, internal IDs and fixed error codes only."""
+    stage = active_stage.get()
+    if stage is not None:
+        stage.setdefault("metrics", {}).update(values)
+
+
 class QueryTrace:
     def __init__(self, mode, request_id):
         self.mode = mode

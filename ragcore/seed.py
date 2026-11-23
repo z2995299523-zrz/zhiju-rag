@@ -6,7 +6,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .connectors import validate_config
-from .documents import parse_document
+from .documents import parse_document_report
 from .storage import pack
 
 
@@ -43,7 +43,7 @@ def seed_workspace(store, conn, selected):
     if len(raw) > 2 * 1024 * 1024:
         raise ValueError("行业模板文件上限为 2 MiB")
     profile = json.loads(raw.decode("utf-8-sig"))
-    if not isinstance(profile, dict) or set(profile) - {"name", "documents", "connectors", "examples"}:
+    if not isinstance(profile, dict) or set(profile) - {"name", "documents", "connectors", "examples", "document_terms"}:
         raise ValueError("行业模板格式错误，请参照 profiles 下的示例")
     name = profile.get("name")
     docs, connectors, examples = (profile.get(k, default) for k, default in
@@ -52,13 +52,22 @@ def seed_workspace(store, conn, selected):
         raise ValueError("行业模板须有名称")
     if not isinstance(docs, dict) or not isinstance(connectors, list) or not isinstance(examples, list):
         raise ValueError("行业模板的 documents 须为对象，connectors 与 examples 须为列表")
+    terms = profile.get("document_terms", {})
+    if not isinstance(terms, dict) or len(terms) > 128:
+        raise ValueError("行业文档词表须为对象，最多定义 128 个查询词")
+    for term, words in terms.items():
+        if (not 2 <= len(term.strip()) <= 64 or not isinstance(words, list) or not 1 <= len(words) <= 8
+                or any(not isinstance(word, str) or not 1 <= len(word.strip()) <= 64 for word in words)):
+            raise ValueError("行业查询词需为 2 至 64 个字符，每个词应对应 1 至 8 个文档用词")
     hashes = {}
     for filename, content in docs.items():
         if (not isinstance(content, str) or not content.strip() or "/" in filename or "\\" in filename
                 or Path(filename).suffix.lower() not in {".md", ".txt", ".csv", ".tsv", ".json", ".jsonl"}):
             raise ValueError("行业模板文档须使用文本格式的文件名和正文")
         data = content.encode()
-        hashes[filename] = store.insert_document(conn, filename, data, parse_document(filename, data))["sha256"]
+        report = parse_document_report(filename, data)
+        chunks = report.pop("chunks")
+        hashes[filename] = store.insert_document(conn, filename, data, chunks, report=report)["sha256"]
     connector_hashes = {}
     for entry in connectors:
         cfg = validate_config(entry)
@@ -81,5 +90,5 @@ def seed_workspace(store, conn, selected):
             raise ValueError("行业示例引用的接口不在模板中")
         used_modes.add(mode)
     conn.executemany("INSERT INTO settings(name,value) VALUES (?,?)", [
-        ("industry_name", name), ("industry_examples", pack({
+        ("industry_name", name), ("document_terms", pack(terms)), ("industry_examples", pack({
             "examples": examples, "documents": hashes, "connectors": connector_hashes}))])

@@ -13,6 +13,7 @@ export function compareChunks(shell, ctx, file, makeDialog) {
       <section class="cmp-panel cmp-source" aria-label="原件">
         <header><h3>原件</h3><a href="${base}/download" download>下载原件</a></header>
         <div class="cmp-location"></div>
+        <div class="cmp-sheet-tools" hidden></div>
         <div class="cmp-source-body" tabindex="0" aria-label="原件内容"></div>
       </section>
       <section class="cmp-panel cmp-chunks" aria-label="检索分块">
@@ -29,6 +30,7 @@ export function compareChunks(shell, ctx, file, makeDialog) {
   const list = dialog.querySelector(".cmp-list");
   const source = dialog.querySelector(".cmp-source-body");
   const location = dialog.querySelector(".cmp-location");
+  const sheetTools = dialog.querySelector(".cmp-sheet-tools");
   const pages = dialog.querySelector(".cmp-pages");
   const previous = pages.querySelector("[data-prev]");
   const next = pages.querySelector("[data-next]");
@@ -48,20 +50,41 @@ export function compareChunks(shell, ctx, file, makeDialog) {
   dialog.querySelectorAll("[data-switch]").forEach(button =>
     button.addEventListener("click", () => switchPane(button.dataset.switch)));
 
-  function drawWindow(view) {
+  function drawWindow(view, focusColumn) {
     const selectedRow = n => view.first !== null && n >= view.first && n <= view.last;
     const rowFlag = row => selectedRow(row.number) ? ' class="cmp-match"' : "";
     if (view.kind === "sheet") {
+      const fields = view.fields || [];
+      const focused = fields.find(f => f.column === focusColumn);
+      const focusLetter = focused?.address.match(/^[A-Z]+/)?.[0];
       source.innerHTML = `<table class="cmp-grid"><caption>${esc(view.sheet)} · 原件单元格</caption>
         <thead><tr><th scope="col">行</th>${view.columns.map(c => '<th scope="col">' + esc(c) + '</th>').join("")}</tr></thead>
         <tbody>${view.rows.map(row => `<tr${rowFlag(row)}><th scope="row">${esc(row.number)}</th>
-          ${row.cells.map(c => '<td>' + esc(c) + '</td>').join("")}</tr>`).join("")}</tbody></table>`;
+          ${row.cells.map((c, i) => '<td' + (selectedRow(row.number) && view.columns[i] === focusLetter ? ' class="cmp-field-match"' : '') + '>' + esc(c) + '</td>').join("")}</tr>`).join("")}</tbody></table>`;
+      sheetTools.hidden = !(fields.length || view.previous_column || view.next_column);
+      sheetTools.innerHTML = fields.length ? `<label>定位字段 <select aria-label="定位原件字段">
+        <option value="">选择字段</option>${fields.map(f => `<option value="${Number(f.column)}" ${f.column === focusColumn ? "selected" : ""}>${esc(f.address)} · ${esc(f.label)}</option>`).join("")}
+        </select></label>` : "";
+      sheetTools.querySelector("select")?.addEventListener("change", e => {
+        if (e.target.value) showSource(data.chunks[selected], Number(e.target.value), true);
+      });
     } else {
       source.innerHTML = (view.first === null ? '<p class="cmp-note">原文件开头 · 此分块记录了字段路径，没有行号。</p>' : "") +
         '<div class="cmp-raw">' + view.rows.map(row => `<div${rowFlag(row)}>
           <span class="cmp-ln">${esc(row.number)}</span><code>${row.prefix_clipped ? "…" : ""}${esc(row.text) || " "}${row.suffix_clipped ? "…" : ""}</code></div>`).join("") + "</div>";
     }
-    if (view.range_clipped) source.insertAdjacentHTML("beforeend", '<p class="cmp-note">已显示定位范围的前一部分。可下载原件查看完整内容。</p>');
+    if (view.kind === "sheet") {
+      for (const [label, col] of [["上一组列",view.previous_column],["下一组列",view.next_column]]) {
+        if (!col) continue;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mg-btn mg-small";
+        button.textContent = label;
+        button.onclick = () => showSource(data.chunks[selected], col);
+        sheetTools.append(button);
+      }
+    }
+    if (view.range_clipped && view.kind !== "sheet") source.insertAdjacentHTML("beforeend", '<p class="cmp-note">此节点较长，完整内容可下载原件核对。</p>');
     source.scrollTop = 0;
     source.scrollLeft = 0;
     const first = source.querySelector(".cmp-match");
@@ -70,11 +93,12 @@ export function compareChunks(shell, ctx, file, makeDialog) {
     }
   }
 
-  async function showSource(chunk) {
+  async function showSource(chunk, column = null, focusField = false) {
     sourceRequest?.abort();
     const request = new AbortController();
     sourceRequest = request;
     location.textContent = chunk.locator;
+    sheetTools.hidden = true;
     if (data.original_kind === "pdf" || data.original_kind === "image") {
       const pdf = data.original_kind === "pdf";
       const page = pdf && /^第 (\d+) 页/.exec(chunk.locator)?.[1];
@@ -93,13 +117,15 @@ export function compareChunks(shell, ctx, file, makeDialog) {
     }
     source.innerHTML = '<p class="cmp-note" role="status">正在读取原件位置…</p>';
     try {
-      const view = await api(base + "/source-window?chunk_id=" + encodeURIComponent(chunk.id), { signal: request.signal });
-      if (!request.signal.aborted && dialog.isConnected) drawWindow(view);
+      const params = new URLSearchParams({chunk_id:chunk.id});
+      if (column) params.set("column", column);
+      const view = await api(base + "/source-window?" + params, { signal: request.signal });
+      if (!request.signal.aborted && dialog.isConnected) drawWindow(view, focusField ? column : null);
     } catch (error) {
       if (request.signal.aborted || !dialog.isConnected) return;
       source.innerHTML = `<p class="cmp-note" role="alert">${esc(error.message || "原件位置读取失败")}</p>
         <button class="mg-btn mg-small" type="button">重试读取原件</button>`;
-      source.querySelector("button").addEventListener("click", () => showSource(chunk));
+      source.querySelector("button").addEventListener("click", () => showSource(chunk, column, focusField));
     }
   }
 
@@ -129,7 +155,7 @@ export function compareChunks(shell, ctx, file, makeDialog) {
       next.disabled = data.offset + data.chunks.length >= data.total;
       list.innerHTML = data.chunks.map((chunk, i) => `<button type="button" class="cmp-chunk" aria-pressed="false">
         <span class="cmp-chunk-heading"><strong>分块 ${data.offset + i + 1}</strong><span>${esc(chunk.locator)}</span></span>
-        <span class="cmp-excerpt">${esc(chunk.text)}</span></button>`).join("") || '<p>此版本没有可检索分块。</p>';
+        <span class="cmp-excerpt">${esc([chunk.context,chunk.text].filter(Boolean).join("\n"))}</span></button>`).join("") || '<p>此版本没有可检索分块。</p>';
       list.querySelectorAll(".cmp-chunk").forEach((button, i) => button.addEventListener("click", () => selectChunk(i, true)));
       list.scrollTop = 0;
       if (data.chunks.length) selectChunk(0, false);

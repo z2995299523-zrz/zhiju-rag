@@ -53,7 +53,7 @@ const managementPages = new Set(["admin", "imports", "connectors", "models", "re
 const modes = { mixed:"综合查询", auto:"自动判断", documents:"文档检索", data:"接口查询" };
 const statuses = { answered:"已回答", partial:"部分回答", needs_input:"待补充", no_evidence:"缺少证据", error:"查询失败" };
 const state = {
-  page:"ask", session:null, mode:"mixed", draft:"", turns:[], active:null, reading:false, sequence:0,
+  page:"ask", session:null, mode:"auto", draft:"", turns:[], active:null, reading:false, sequence:0,
   replayError:"", scrollTop:0, chatKey:0,
   history:[], historyFilter:"", historyBusy:false, historyMore:false, historyOffset:0, historyError:"", historySequence:0
 };
@@ -90,7 +90,7 @@ const canManage = () => canUseWorkspace() && ["admin", "administrator"].includes
 function resetAsk() {
   stopQuery();
   state.sequence++;
-  Object.assign(state, {reading:false, turns:[], replayError:"", draft:"", mode:"mixed", scrollTop:0, chatKey:++nextChatKey});
+  Object.assign(state, {reading:false, turns:[], replayError:"", draft:"", mode:"auto", scrollTop:0, chatKey:++nextChatKey});
   closeEvidence(false);
 }
 
@@ -517,9 +517,9 @@ async function query(raw, extra = {}, retry = null) {
         Object.assign(turn.result, data.result);
         turn.phase = "complete";
         paintTurn(turn,true); refreshEvidence(turn.result);
-        const latest = state.turns.findLast(item => item.phase === "complete");
-        history.replaceState({chatKey:state.chatKey}, "", "#ask/" + encodeURIComponent(latest.result.id));
+        history.replaceState({chatKey:state.chatKey}, "", "#ask/" + encodeURIComponent(turn.result.id));
         state.active = null; updateComposer();
+        if (state.turns.at(-1) !== turn) await replay(turn.result.id);
         void loadHistory();
         return;
       }
@@ -540,7 +540,7 @@ async function replay(id) {
   stopQuery();
   const ticket = ++state.sequence;
   const requestedHash = location.hash;
-  Object.assign(state, {turns:[], reading:true, replayError:"", draft:"", mode:"mixed", scrollTop:0, chatKey:++nextChatKey});
+  Object.assign(state, {turns:[], reading:true, replayError:"", draft:"", mode:"auto", scrollTop:0, chatKey:++nextChatKey});
   renderAsk();
   try {
     const result = await api("/api/history/" + encodeURIComponent(id));

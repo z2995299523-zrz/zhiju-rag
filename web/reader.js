@@ -101,7 +101,13 @@ function renderChunks(data) {
     if (cited) title.append(element("span", "cite-label", "引用位置"));
     const content = element("p", "chunk-text");
     highlight(content, String(chunk.text || ""), searchTerm);
-    section.append(title, content);
+    section.append(title);
+    if (chunk.context) {
+      const context = element("p", "chunk-context");
+      highlight(context, String(chunk.context), searchTerm);
+      section.append(context);
+    }
+    section.append(content);
     sections.append(section);
     const anchor = element("a", cited ? "cited" : "", locator);
     anchor.href = "#" + section.id;

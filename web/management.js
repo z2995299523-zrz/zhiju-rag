@@ -1,5 +1,6 @@
 import { managementNav } from "./admin.js";
 import { compareChunks } from "./chunk-compare.js";
+import { batchDescription, optionsForm, readOptions, warningsOf } from "./import-options.js";
 
 const pageSize = 25;
 
@@ -114,6 +115,11 @@ function openEditor(shell, ctx, item, reload) {
       </div>
       <div class="mg-subheading"><h3>查询参数</h3><button class="mg-btn mg-small" type="button" data-add-param>${ctx.icon("plus", 14)}添加参数</button></div>
       <div class="mg-param-list"></div>
+      <details><summary>业务口径与响应规则</summary>
+        <label>指标定义（JSON 数组）<textarea name="metrics" rows="3" spellcheck="false" placeholder='[{"field":"库存量","label":"库存","unit":"件","additive":true,"definition":"在库实物数量"}]'>${esc(c.metrics ? JSON.stringify(c.metrics, null, 2) : "")}</textarea></label>
+        <label>响应规则（JSON 对象）<textarea name="response_contract" rows="3" spellcheck="false" placeholder='{"success_path":"code","success_value":0,"total_path":"data.total","has_more_path":"data.has_more"}'>${esc(c.response_contract ? JSON.stringify(c.response_contract, null, 2) : "")}</textarea></label>
+        <small>当接口承诺按条件一次返回全部数据时，可填写 {"complete":true}。</small>
+      </details>
       <div class="mg-error" role="alert" hidden></div>
       <div class="mg-actions"><button type="button" class="mg-btn" data-cancel>取消</button>
         <button type="submit" class="mg-btn mg-primary">保存接口</button></div>
@@ -131,6 +137,7 @@ function openEditor(shell, ctx, item, reload) {
       <label>类型<select name="param_type" aria-label="参数类型">${["string", "integer", "number", "date"].map(t =>
         `<option value="${t}"${(p.type || "string") === t ? " selected" : ""}>${typeName(t)}</option>`).join("")}</select></label>
       <label class="mg-aliases">别名<input name="param_aliases" value="${esc((p.aliases || []).join("，"))}" placeholder="用逗号分隔"></label>
+      <label>可选文本值<input name="param_choices" value="${esc((p.choices || []).join("，"))}" placeholder="如：研发一部，研发二部"></label>
       <label class="mg-check"><input type="checkbox" name="param_required"${p.required ? " checked" : ""}>必填</label>
       <button type="button" class="mg-icon-btn" aria-label="移除参数" title="移除参数">${ctx.icon("trash", 16)}</button>`;
     row.querySelector("button").addEventListener("click", () => row.remove());
@@ -148,10 +155,19 @@ function openEditor(shell, ctx, item, reload) {
     const payload = {};
     for (const key of ["name", "description", "url", "records_path", "token_env"]) payload[key] = form.elements.namedItem(key).value.trim();
     payload.keywords = tokens(form.elements.keywords.value);
+    try {
+      for (const key of ["metrics", "response_contract"]) {
+        const value = form.elements.namedItem(key).value.trim();
+        if (value) payload[key] = JSON.parse(value);
+      }
+    } catch {
+      showError(error, new Error("指标定义或响应规则的 JSON 格式有误。"));
+      return;
+    }
     payload.parameters = [...list.children].map(row => {
       const field = key => row.querySelector('[name="param_' + key + '"]');
       return { name: field("name").value.trim(), label: field("label").value.trim(), type: field("type").value,
-        required: field("required").checked, aliases: tokens(field("aliases").value) };
+        required: field("required").checked, aliases: tokens(field("aliases").value), choices: tokens(field("choices").value) };
     });
     if (new Set(payload.parameters.map(p => p.name)).size !== payload.parameters.length) {
       showError(error, "请求字段名重复，请分别命名。");
@@ -193,7 +209,7 @@ function openTest(shell, ctx, item) {
     const params = {};
     parameters.forEach((p, i) => {
       const raw = form.elements["q" + i].value.trim();
-      if (raw) params[p.name] = ["integer", "number"].includes(p.type) ? Number(raw) : raw;
+      if (raw) params[p.name] = raw;
     });
     submit.disabled = true;
     const error = form.querySelector(".mg-error");
@@ -204,10 +220,11 @@ function openTest(shell, ctx, item) {
       const data = await ctx.api("/api/connectors/" + safeRowId(item) + "/test", jsonRequest("POST", { params }));
       const rows = data.rows || [];
       const preview = rows.slice(0, 20);
-      const total = data.total_count ?? rows.length;
-      result.innerHTML = `<div class="mg-subheading"><h3>返回结果</h3><span>${esc(Number(total).toLocaleString("zh-CN"))} 条记录</span></div>
+      const countLabel = data.total_count == null ? `本次 ${rows.length} 条` : `本次 ${rows.length} 条，共 ${data.total_count} 条`;
+      result.innerHTML = `<div class="mg-subheading"><h3>返回结果</h3><span>${esc(countLabel)}</span></div>
         <small>${esc(formatDate(data.fetched_at))} · ${esc(data.request || item.url)}</small>
-        ${total > preview.length ? "<p>预览前 " + preview.length + " 条记录</p>" : ""}
+        ${rows.length > preview.length ? "<p>预览前 " + preview.length + " 条记录</p>" : ""}
+        ${data.has_more === true ? "<p>仍有后续记录</p>" : ""}
         <pre>${esc(JSON.stringify(preview, null, 2))}</pre>`;
       result.hidden = false;
     } catch (err) {
@@ -234,8 +251,13 @@ export async function renderManagement(kind, container, ctx) {
     ${isImport ? `<button class="mg-drop" type="button">
       <span class="mg-drop-icon">${icon("upload", 22)}</span><span><strong>选择文件或拖放到此处</strong>
         <small data-format-hint>正在读取可导入格式…</small>
-        <small>导入同名文件将更新检索版本，历史引用保留原版本。</small></span></button>
+        <small>同一来源下的同名文件更新为新版本，历史引用可继续查看。</small></span></button>
       <input type="file" class="mg-picker" multiple hidden>
+      <details class="mg-import-options"><summary>来源与解析设置</summary>
+        <label>资料来源（可填部门或资料集名称）<input data-source-key maxlength="128"></label>
+        ${optionsForm()}
+        <label><input type="checkbox" data-inspect> 先预览分块，再确认导入</label>
+      </details>
       <div class="mg-import-result" aria-live="polite" hidden></div>` : ""}
     <div class="mg-panel"><div class="mg-list-toolbar"><div class="mg-list-title"><h2>${isDoc ? "已导入文档" : "已配置接口"}</h2>
       <span class="mg-count"></span></div><label class="mg-search">${icon("search", 16)}<input type="search"
@@ -294,10 +316,11 @@ export async function renderManagement(kind, container, ctx) {
     const viewer = "/reader.html?id=" + safeRowId(d);
     return `<tr><td><div class="mg-doc-name"><span class="mg-format-icon">${icon("file", 18)}</span><div>
       <a href="${viewer}" target="_blank" rel="noopener" title="在线阅读">${esc(d.filename)}</a>
-      <small>${esc(ext)} · ${esc(formatSize(d.size))}</small></div></div></td>
+      <small>${esc([d.source_key,ext,formatSize(d.size),d.warning_count ? d.warning_count + " 项导入提示" : ""].filter(Boolean).join(" · "))}</small></div></div></td>
       <td class="mg-number">${esc(d.chunk_count ?? "—")}</td><td class="mg-time">${esc(formatDate(d.created_at))}</td>
       <td class="mg-controls"><div class="mg-doc-actions">
-        ${isImport ? `<button type="button" class="mg-compare-link" data-action="compare" data-item="${i}"
+        ${isImport ? `<button type="button" class="mg-compare-link" data-action="reindex" data-item="${i}">重新解析</button>
+          <button type="button" class="mg-compare-link" data-action="compare" data-item="${i}"
           aria-label="分块对照 ${esc(d.filename)}">分块对照</button>` :
           `<a class="mg-read-link" href="${viewer}" target="_blank" rel="noopener" aria-label="在线查看 ${esc(d.filename)}">在线查看</a>`}
         <a href="/api/documents/${safeRowId(d)}/download" download aria-label="下载原件 ${esc(d.filename)}">下载原件</a>
@@ -346,10 +369,93 @@ export async function renderManagement(kind, container, ctx) {
     area.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", () => {
       const item = visible[Number(button.dataset.item)];
       if (button.dataset.action === "compare") compareChunks(shell, ctx, item, makeDialog);
+      else if (button.dataset.action === "reindex") reindex(item, button);
       else if (button.dataset.action === "delete") confirmRemoval(shell, ctx, item, isDoc, reload);
       else if (button.dataset.action === "edit") openEditor(shell, ctx, item, reload);
       else openTest(shell, ctx, item);
     }));
+  }
+
+  async function reindex(item, button) {
+    button.disabled = true;
+    try {
+      const doc = (await ctx.api(`/api/documents/${item.id}/preview?limit=1`)).document;
+      let activeId = doc.id;
+      const dialog = makeDialog(shell, ctx, "重新解析 · " + item.filename,
+        `<div data-settings>${optionsForm(doc.options)}</div>
+        <p data-msg role="status">${esc(warningsOf(doc))}</p>
+        <button class="mg-btn mg-primary" type="button" data-rebuild>按以上设置重新解析</button>
+        <section class="mg-versions"><h3>索引版本</h3>
+          <p data-current></p>
+          <p data-version-status role="status"></p>
+          <label hidden>已有版本<select data-versions></select></label>
+          <button class="mg-btn mg-small" type="button" data-refresh-versions hidden>重新读取版本</button>
+          <button class="mg-btn mg-small" type="button" data-restore hidden disabled>确认启用所选版本</button>
+        </section>`);
+      const rebuild = dialog.querySelector("[data-rebuild]");
+      const restore = dialog.querySelector("[data-restore]");
+      const list = dialog.querySelector("[data-versions]");
+      const retry = dialog.querySelector("[data-refresh-versions]");
+      const note = dialog.querySelector("[data-version-status]");
+      const message = dialog.querySelector("[data-msg]");
+      let working = false;
+      const describe = version => `#${version.id} · 解析版本 ${version.parser_version} · ${formatDate(version.created_at)} · ${version.chunk_count} 个分块`;
+
+      async function loadVersions() {
+        const requested = activeId;
+        list.parentElement.hidden = restore.hidden = retry.hidden = true;
+        restore.disabled = true;
+        note.textContent = "正在读取版本…";
+        try {
+          const versions = await ctx.api(`/api/documents/${requested}/versions`);
+          if (requested !== activeId || !dialog.open) return;
+          const current = versions.find(v => v.active);
+          const archived = versions.filter(v => !v.active);
+          dialog.querySelector("[data-current]").textContent = current ? "当前版本 · " + describe(current) : "";
+          list.replaceChildren(new Option("选择要启用的版本", ""));
+          for (const version of archived) list.add(new Option(describe(version), version.id));
+          list.parentElement.hidden = restore.hidden = !archived.length;
+          note.textContent = archived.length ? "" : "暂无历史版本";
+        } catch (error) {
+          if (requested !== activeId || !dialog.open) return;
+          note.textContent = messageOf(error);
+          retry.hidden = false;
+        }
+      }
+
+      async function changeVersion(restoreId) {
+        if (working) return;
+        working = true;
+        rebuild.disabled = list.disabled = restore.disabled = retry.disabled = true;
+        try {
+          const base = `/api/documents/${activeId}`;
+          const result = restoreId
+            ? await ctx.api(base + "/restore/" + restoreId, {method:"POST"})
+            : await ctx.api(base + "/reindex", jsonRequest("POST", readOptions(dialog)));
+          activeId = result.id;
+          const state = restoreId ? "已启用历史索引版本" : result.duplicate ? "已是当前解析版本" : "已启用新解析版本";
+          message.textContent = state + " #" + activeId;
+          await reload();
+          if (!dialog.open) return;
+          const updated = (await ctx.api(`/api/documents/${activeId}/preview?limit=1`)).document;
+          dialog.querySelector("[data-settings]").innerHTML = optionsForm(updated.options);
+          message.textContent += "\n" + warningsOf(updated);
+          await loadVersions();
+        } catch (error) {
+          message.textContent = messageOf(error);
+        } finally {
+          working = false;
+          rebuild.disabled = list.disabled = retry.disabled = false;
+          restore.disabled = !list.value;
+        }
+      }
+      list.onchange = () => { restore.disabled = !list.value || working; };
+      retry.onclick = loadVersions;
+      restore.onclick = () => { if (list.value) changeVersion(list.value); };
+      rebuild.onclick = () => changeVersion(null);
+      await loadVersions();
+    } catch (error) { shell.querySelector(".mg-import-result").hidden = false; shell.querySelector(".mg-import-result").textContent = messageOf(error); }
+    finally { button.disabled = false; }
   }
 
   search.addEventListener("input", () => { page = 0; draw(); });
@@ -368,62 +474,103 @@ export async function renderManagement(kind, container, ctx) {
       upload(e.dataTransfer.files);
     });
     picker.addEventListener("change", () => upload(picker.files));
-    async function upload(files) {
+    function upload(files) {
       if (!files?.length || uploading) return;
-      const selected = Array.from(files);
-      const errors = [];
-      const imported = [];
-      const retryable = [];
       feedback.hidden = false;
-      feedback.classList.remove("mg-warning");
+      try {
+        const settings = {options:readOptions(shell), source:shell.querySelector("[data-source-key]").value.trim()};
+        const stage = shell.querySelector("[data-inspect]").checked ? "inspect" : "commit";
+        const entries = Array.from(files, file => ({file}));
+        runBatch(entries, entries, stage, settings);
+      } catch (error) {
+        feedback.classList.add("mg-warning");
+        feedback.textContent = messageOf(error);
+        picker.value = "";
+      }
+    }
+
+    async function runBatch(entries, targets, stage, settings) {
+      if (uploading) return;
       uploading = true;
       drop.disabled = true;
       drop.setAttribute("aria-busy", "true");
       try {
-        for (const [i, file] of selected.entries()) {
-          feedback.textContent = "正在导入 " + (i + 1) + " / " + selected.length + " · " + file.name;
+        for (const [index, entry] of targets.entries()) {
+          const {file} = entry;
+          feedback.textContent = (stage === "inspect" ? "正在预检 " : "正在导入 ") +
+            (index + 1) + " / " + targets.length + " · " + file.name;
+          entry.stage = stage;
+          entry.result = null;
+          entry.error = null;
           if (maxFileBytes && file.size > maxFileBytes) {
-            errors.push({ filename: file.name, error: "单文件超过 " + (maxFileBytes / 1024 / 1024) + " MiB" });
+            entry.error = {error:"单文件超过 " + (maxFileBytes / 1024 / 1024) + " MiB"};
             continue;
           }
           const body = new FormData();
           body.append("files", file, file.name);
+          body.append("source_key", settings.source);
+          body.append("options", JSON.stringify(settings.options));
           try {
-            const result = await ctx.api("/api/documents", { method: "POST", body });
-            imported.push(...(result.imported || []));
-            errors.push(...(result.errors || []));
-          } catch (err) {
-            errors.push({ filename: file.name, error: messageOf(err) });
-            retryable.push(file);
+            const result = await ctx.api(stage === "inspect" ? "/api/documents/inspect" : "/api/documents", {method:"POST", body});
+            entry.error = result.errors?.[0];
+            entry.result = result.imported?.[0];
+            if (!entry.result && !entry.error) throw new Error("没有收到文件处理结果");
+          } catch (error) {
+            entry.error = {error:messageOf(error), retryable:true};
           }
         }
-        const duplicates = imported.filter(item => item.duplicate).length;
-        feedback.classList.toggle("mg-warning", !!errors.length);
-        const timing = item => Number.isFinite(item?.parse_ms) ? " · 解析耗时 " + item.parse_ms + " ms" : "";
-        feedback.innerHTML = `<strong>成功导入 ${imported.length - duplicates} 个文件${duplicates ? "，" + duplicates + " 个已存在" : ""}${errors.length ? "，" + errors.length + " 个失败" : ""}</strong>` +
-          (imported.length ? "<ul>" + imported.map((item, i) => `<li>${esc(item.filename)}${esc(timing(item))}
-            <button type="button" class="mg-compare-link" data-import-compare="${i}">分块对照</button></li>`).join("") + "</ul>" : "") +
-          (errors.length ? "<ul>" + errors.map(error => `<li>${esc(typeof error === "string" ? error :
-            [error.filename || error.name, error.error || error.message || error.detail || "导入失败"].filter(Boolean).join(" · ") + timing(error))}</li>`).join("") + "</ul>" : "");
-        feedback.querySelectorAll("[data-import-compare]").forEach(button => button.addEventListener("click", () =>
-          compareChunks(shell, ctx, imported[Number(button.dataset.importCompare)], makeDialog)));
-        if (retryable.length) {
-          const retry = document.createElement("button");
-          retry.type = "button";
-          retry.className = "mg-btn mg-small";
-          retry.textContent = `重试请求失败的 ${retryable.length} 个文件`;
-          retry.addEventListener("click", () => upload(retryable));
-          feedback.append(retry);
-        }
-        await reload();
-      } catch (error) {
-        feedback.classList.add("mg-warning");
-        feedback.textContent = messageOf(error);
+        if (stage === "commit") await reload();
+        drawBatch(entries, settings);
       } finally {
         picker.value = "";
         uploading = false;
         drop.disabled = false;
         drop.removeAttribute("aria-busy");
+      }
+    }
+
+    function drawBatch(entries, settings) {
+      const previewed = entries.filter(e => e.stage === "inspect" && e.result);
+      const committed = entries.filter(e => e.stage === "commit" && e.result);
+      const failed = entries.filter(e => e.error);
+      const duplicates = committed.filter(e => e.result.duplicate).length;
+      const summary = [
+        previewed.length && previewed.length + " 个待确认",
+        committed.length && "成功导入 " + (committed.length - duplicates) + " 个文件",
+        duplicates && duplicates + " 个已存在",
+        failed.length && failed.length + " 个失败"
+      ].filter(Boolean).join("，");
+      feedback.classList.toggle("mg-warning", !!failed.length);
+      feedback.innerHTML = "<strong>" + esc(summary) + "</strong><p>" + esc(batchDescription(settings)) + "</p><ul>" + entries.map((entry, index) => {
+        const {error, result, file} = entry;
+        if (error) {
+          const time = Number.isFinite(error.parse_ms) ? " · 解析耗时 " + error.parse_ms + " ms" : "";
+          return `<li>${esc(file.name)} · ${esc(error.error || error.message || "文件处理失败")}${esc(time)}</li>`;
+        }
+        const warning = warningsOf(result);
+        const preview = entry.stage === "inspect";
+        const timing = Number.isFinite(result.parse_ms) ? " · 解析耗时 " + result.parse_ms + " ms" : "";
+        const detail = preview
+          ? "<ul>" + result.sample.map(s => `<li>${esc(s.locator)} · ${esc([s.context,s.text].filter(Boolean).join(" ").slice(0,240))}</li>`).join("") + "</ul>"
+          : ` <button type="button" class="mg-compare-link" data-import-compare="${index}">分块对照</button>`;
+        return `<li><strong>${esc(file.name)}</strong> · ${esc(result.chunk_count)} 个分块${esc(timing)}
+          ${warning ? "<p>" + esc(warning) + "</p>" : ""}${detail}</li>`;
+      }).join("") + "</ul>";
+      feedback.querySelectorAll("[data-import-compare]").forEach(button => button.addEventListener("click", () =>
+        compareChunks(shell, ctx, entries[Number(button.dataset.importCompare)].result, makeDialog)));
+      function action(label, targets, stage, primary) {
+        if (!targets.length) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mg-btn " + (primary ? "mg-primary" : "mg-small");
+        button.textContent = label;
+        button.onclick = () => runBatch(entries, targets, stage, settings);
+        feedback.append(button);
+      }
+      action("确认导入已预览文件", previewed, "commit", true);
+      for (const stage of ["inspect", "commit"]) {
+        const retryable = failed.filter(e => e.stage === stage && e.error.retryable);
+        action(`重试${stage === "inspect" ? "预检" : "导入"}失败的 ${retryable.length} 个文件`, retryable, stage, false);
       }
     }
   }

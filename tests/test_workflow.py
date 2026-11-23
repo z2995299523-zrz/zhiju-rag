@@ -325,7 +325,7 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual((ambiguous["status"], ambiguous["citations"]), ("needs_input", []))
         self.assertIn("年度", ambiguous["missing"])
         none = self.ask(question, connector_id=ident, params={"project": "不存在的项目", "year": 2026})
-        self.assertEqual(none["status"], "no_evidence")
+        self.assertEqual(none["status"], "answered")
         self.assertEqual(none["citations"][0]["rows"], [])
         unrelated = self.ask("长颈鹿睡觉时为什么站立？")
         self.assertEqual((unrelated["status"], unrelated["citations"]), ("no_evidence", []))

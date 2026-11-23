@@ -26,6 +26,7 @@ $env:RAG_INDUSTRY_PROFILE = 'manufacturing'
 | 字段 | 内容 |
 | --- | --- |
 | `name` | 行业工作区模板名称 |
+| `document_terms` | 可选。将本行业的查询用语映射至原件用词，例如 `{"交机单":["设备交接记录"]}`，每个查询词可对应 1 至 8 个用词 |
 | `documents` | 以文件名为键、UTF-8 文本为值的对象，支持 MD、TXT、CSV、TSV、JSON 和 JSONL。PDF、Office 和扫描件可启动后从「导入管理」上传 |
 | `connectors` | 只读业务接口定义的数组，字段和管理后台相同。真实接口的主机与端口须先列入 `RAG_ALLOWED_HOSTS`。需要凭据时，模板里只填 `token_env` 指向的环境变量名 |
 | `examples` | 每种模式至多一题。`documents` 绑定 `document` 文件名，`data` 绑定 `connector` 名称，`mixed` 同时绑定两者。问题正文写在 `question` |
@@ -44,3 +45,6 @@ python -m ragcore.evaluate --profile manufacturing --cases eval/manufacturing_ca
 ```
 
 离线评测使用临时数据库。自定义评测可将 `--profile` 设为自有模板 JSON 的路径，将 `--cases` 设为对应题集。涉及真实 HTTP 业务接口的验收应在独立测试部署执行，核对实际鉴权、指标单位、数据范围和返回记录。
+## 行业文档检索词
+
+行业模板可以包含 `"document_terms":{"交机单":["设备交接记录"]}`。键是用户常用的查询词，列表中填写该行业的原件用词。新工作区初始化时保存自己的词表，文档检索和检索评测都按本工作区的词表扩展候选；答案仍须引用实际原文。例如“流转单”可以在制造工作区对应设备交接记录，在仓储工作区对应收货交接记录。业务接口筛选、指标别名及单位另在连接器定义中设置。

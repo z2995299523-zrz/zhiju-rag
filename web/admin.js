@@ -10,6 +10,7 @@ const statusLabels = { answered: "已回答", partial: "部分回答", no_eviden
 const stageLabels = { parse: "问题解析", parameters: "核对条件", data: "业务查数", retrieval: "文档检索", generation: "生成回答", archive: "保存历史" };
 const stepResults = { ok: "完成", failed: "失败", stopped: "中断", empty: "无匹配结果", needs_input: "待补充条件", no_connector: "缺少匹配接口" };
 const stepNotes = {
+  verified_record_lookup: "模型段落未通过校验，已定位唯一记录并引用原件取值",
   local_route_fallback: "模型解析未完成，已使用本地规则", lexical_fallback: "向量排序未完成，已使用关键词排序",
   embedding_busy: "向量服务繁忙，已使用关键词排序", extractive_fallback: "模型未选出可用引文，已使用原文摘录",
 };
@@ -75,9 +76,20 @@ export async function renderAdmin(container, ctx) {
   function traceRow(run) {
     const outcome = run.outcome === "stopped" ? "已中断" : statusLabels[run.outcome];
     const problem = run.stages.find(step => step.status === "failed" || step.status === "stopped");
+    const labels = {candidate_count:"候选块数", lexical_ids:"词法前列", ranked_ids:"重排前列", excerpt_ids:"选取原文",
+      embedding_batch_size:"本批条数", embedding_batches:"向量请求数", embedding_dimension:"向量维数",
+      embedding_outcome:"向量结果", embedding_cache_hits:"向量缓存命中", first_upstream_ms:"首个上游增量（毫秒）",
+      first_verified_ms:"首个核验段落（毫秒）", upstream_outcome:"生成结果", ranking_method:"排序方法"};
+    const outcomes = {ranked:"语义命中", lexical:"关键词", lexical_fallback:"关键词回退", hybrid:"混合",
+      below_threshold:"低于相似度门槛", insufficient:"依据不足", validation:"校验失败",
+      invalid_response:"响应格式异常", timeout:"超时", transport:"连接异常", busy:"繁忙", complete:"完成"};
+    const metrics = step => Object.entries(step.metrics || {}).filter(([key]) => labels[key]).map(([key,val]) => {
+      const value = Array.isArray(val) ? val.join("、") || "无" : outcomes[val] || String(val);
+      return `<small>${esc(labels[key])} · ${esc(value)}</small>`;
+    }).join("");
     const steps = run.stages.map(step => `<li>
       <span>${esc(stageLabels[step.name])}</span><span>${esc(stepResults[step.status])}</span><span>${esc(duration(step.duration_ms))}</span>
-      ${step.notes.map(note => `<small>${esc(stepNotes[note])}</small>`).join("")}</li>`).join("");
+      ${step.notes.map(note => `<small>${esc(stepNotes[note] || note)}</small>`).join("")}${metrics(step)}</li>`).join("");
     return `<details class="adm-trace">
       <summary><span class="adm-trace-name">执行 #${esc(run.id)} · ${esc(intentLabels[run.mode] || "自动判断")}</span>
         <span>${esc(timeLabel(run.started_at))}</span><span class="adm-trace-summary-status">${esc(outcome)}${problem ? " · " + esc(stageLabels[problem.name]) : ""}</span>

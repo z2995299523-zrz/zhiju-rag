@@ -3,15 +3,15 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-import threading
 import time
-from concurrent.futures import Future
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .accounts import ensure_schema
-from .ingest_worker import parse_upload
+from .import_schema import DOCUMENT_SCHEMA, PARSER_VERSION, ImportOptions, migrate_imports
+from .ingest_worker import UploadBusyError, parse_upload_report
+from .ocr import available as ocr_available
 from .retrieval import index_terms
 
 
@@ -23,14 +23,19 @@ def pack(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
 
 
-DOC_FIELDS = "id,filename,size,sha256,chunk_count,created_at"
-CHUNK_FIELDS = "c.id,c.document_id,c.locator,c.text,d.filename,d.sha256"
+DOC_FIELDS = "id,filename,size,sha256,chunk_count,created_at,source_key,parser_version,warning_count"
+CHUNK_FIELDS = "c.id,c.document_id,c.locator,c.text,c.context,c.metadata,d.filename,d.sha256,d.source_key"
 
 
 class ImportParseError(ValueError):
-    def __init__(self, message, elapsed_ms):
+    def __init__(self, message, elapsed_ms, code="invalid_document"):
         super().__init__(message)
         self.elapsed_ms = elapsed_ms
+        self.code = code
+
+
+class StaleImport(ValueError):
+    """Another importer replaced or deactivated the selected revision."""
 
 
 class RequestConflict(ValueError):
@@ -48,8 +53,6 @@ class Store:
     def __init__(self, directory):
         self.path = Path(directory).resolve() / "workspace.sqlite3"
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._running = {}
-        self._running_lock = threading.Lock()
 
     @contextmanager
     def db(self):
@@ -65,13 +68,9 @@ class Store:
     def initialize(self, seed=None):
         with self.db() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.executescript("CREATE TABLE IF NOT EXISTS documents " + DOCUMENT_SCHEMA + ";")
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS settings (name TEXT PRIMARY KEY, value TEXT);
-                CREATE TABLE IF NOT EXISTS documents (
-                    id INTEGER PRIMARY KEY, filename TEXT NOT NULL, size INTEGER NOT NULL,
-                    sha256 TEXT NOT NULL, chunk_count INTEGER NOT NULL, created_at TEXT NOT NULL,
-                    active INTEGER NOT NULL DEFAULT 1, content BLOB NOT NULL, UNIQUE(filename,sha256)
-                );
                 CREATE TABLE IF NOT EXISTS chunks (
                     id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL REFERENCES documents(id),
                     locator TEXT NOT NULL, text TEXT NOT NULL
@@ -103,7 +102,10 @@ class Store:
                 CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, created_at TEXT, actor TEXT,
                     action TEXT, resource TEXT);
             """)
+            if "source_key" not in {r["name"] for r in conn.execute("PRAGMA table_info(documents)")}:
+                conn.execute("PRAGMA foreign_keys=OFF")
             conn.execute("BEGIN IMMEDIATE")
+            migrate_imports(conn)
             ensure_schema(conn)
             if "parent_id" not in {row["name"] for row in conn.execute("PRAGMA table_info(history)")}:
                 conn.execute("ALTER TABLE history ADD COLUMN parent_id INTEGER REFERENCES history(id)")
@@ -114,41 +116,78 @@ class Store:
             seed_workspace(self, conn, initial_profile(seed))
             conn.execute("INSERT INTO settings VALUES ('initialized','1')")
 
-    def insert_document(self, conn, filename, content, chunks, *, actor="system"):
+    def insert_document(self, conn, filename, content, chunks, *, actor="system",
+                        source_key="", recipe='{"options":{}}', report=None, expected_id=None):
         digest = hashlib.sha256(content).hexdigest()
-        existing = conn.execute("SELECT id,active FROM documents WHERE filename=? AND sha256=?",
-                                (filename, digest)).fetchone()
+        if expected_id is not None and not conn.execute(
+            "SELECT 1 FROM documents WHERE id=? AND active=1 AND filename=? AND source_key=?",
+            (expected_id, filename, source_key)
+        ).fetchone():
+            raise StaleImport("资料已更新或停用，请刷新后选择当前版本")
+        existing = conn.execute("""SELECT id,active FROM documents WHERE source_key=? AND filename=?
+                                AND sha256=? AND parser_version=? AND recipe=?""",
+                                (source_key, filename, digest, PARSER_VERSION, recipe)).fetchone()
         duplicate = existing is not None and bool(existing["active"])
         if not duplicate:
-            conn.execute("UPDATE documents SET active=0 WHERE filename=? AND active=1", (filename,))
+            conn.execute("UPDATE documents SET active=0 WHERE source_key=? AND filename=? AND active=1", (source_key, filename))
         if existing:
             doc_id = existing["id"]
             conn.execute("UPDATE documents SET active=1 WHERE id=?", (doc_id,))
         else:
-            cursor = conn.execute("""INSERT INTO documents(filename,size,sha256,chunk_count,created_at,content)
-                                  VALUES (?,?,?,?,?,?)""", (filename, len(content), digest, len(chunks), now(), content))
+            report = report or {}
+            cursor = conn.execute("""INSERT INTO documents(filename,size,sha256,chunk_count,created_at,content,
+                                  source_key,parser_version,recipe,report,warning_count) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                                  (filename, len(content), digest, len(chunks), now(), content, source_key, PARSER_VERSION,
+                                   recipe, pack(report), len(report.get("warnings", []))))
             doc_id = cursor.lastrowid
             for chunk in chunks:
-                key = conn.execute("INSERT INTO chunks(document_id,locator,text) VALUES (?,?,?)",
-                                   (doc_id, chunk["locator"], chunk["text"])).lastrowid
-                tokens = " ".join(index_terms(filename + " " + chunk["locator"] + " " + chunk["text"]))
+                context = chunk.get("context", "")
+                key = conn.execute("INSERT INTO chunks(document_id,locator,text,context,metadata) VALUES (?,?,?,?,?)",
+                                   (doc_id, chunk["locator"], chunk["text"], context, pack(chunk.get("metadata", {})))).lastrowid
+                tokens = " ".join(index_terms(" ".join((source_key, filename, chunk["locator"], context, chunk["text"]))))
                 conn.execute("INSERT INTO chunk_index(rowid,tokens) VALUES (?,?)", (key, tokens))
         if not duplicate:
             self.audit(conn, actor, "document.import", str(doc_id))
-        result = dict(conn.execute(f"SELECT {DOC_FIELDS} FROM documents WHERE id=?", (doc_id,)).fetchone())
+        result = dict(conn.execute(f"SELECT {DOC_FIELDS},report FROM documents WHERE id=?", (doc_id,)).fetchone())
+        result.update(json.loads(result.pop("report")))
         return {**result, "duplicate": duplicate}
 
-    def ingest(self, filename, content, actor):
+    def ingest(self, filename, content, actor, *, source_key="", options=None, expected_id=None):
+        source_key = source_key.strip()
+        if len(source_key) > 128 or any(ord(ch) < 32 for ch in source_key):
+            raise ValueError("资料来源名称过长或包含控制字符")
+        settings = ImportOptions.model_validate(options or {}).model_dump(exclude_defaults=True)
+        recipe = dict(options=settings)
+        if Path(filename).suffix.lower() in {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff"}:
+            recipe["ocr"] = ocr_available()
         started = time.perf_counter()
         try:
-            chunks = parse_upload(filename, content)
+            report = parse_upload_report(filename, content, settings)
         except ValueError as exc:
-            raise ImportParseError(str(exc), round((time.perf_counter() - started) * 1000, 1)) from exc
+            raise ImportParseError(str(exc), round((time.perf_counter() - started) * 1000, 1),
+                                   "busy" if isinstance(exc, UploadBusyError) else "invalid_document") from exc
         parse_ms = round((time.perf_counter() - started) * 1000, 1)
+        chunks = report.pop("chunks")
         with self.db() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            saved = self.insert_document(conn, filename, content, chunks, actor=actor)
+            saved = self.insert_document(conn, filename, content, chunks, actor=actor, source_key=source_key,
+                                         recipe=pack(recipe), report=report, expected_id=expected_id)
         return {**saved, "parse_ms": parse_ms}
+
+    def reindex(self, doc_id, actor, options=None):
+        with self.db() as conn:
+            row = conn.execute("SELECT filename,source_key,content,recipe FROM documents WHERE id=? AND active=1",
+                               (doc_id,)).fetchone()
+        if row is None:
+            raise StaleImport("资料不存在或已停用")
+        return self.ingest(row["filename"], row["content"], actor, source_key=row["source_key"],
+                           options=json.loads(row["recipe"]).get("options", {}) if options is None else options,
+                           expected_id=doc_id)
+
+    def document_terms(self):
+        with self.db() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE name='document_terms'").fetchone()
+        return json.loads(row[0]) if row else {}
 
     def candidates(self, question, cap=180, *, with_method=False):
         with self.db() as conn:
@@ -166,6 +205,8 @@ class Store:
                     JOIN chunks c ON c.id=chunk_index.rowid JOIN documents d ON d.id=c.document_id
                     WHERE chunk_index MATCH ? AND d.active=1 ORDER BY rank LIMIT ?""", (query, cap))
             chunks = [dict(row) for row in result]
+            for chunk in chunks:
+                chunk["metadata"] = json.loads(chunk["metadata"])
             return (chunks, method) if with_method else chunks
 
     def connectors(self):
@@ -184,23 +225,36 @@ class Store:
 
     @asynccontextmanager
     async def query_turn(self, owner, request_id):
-        """Let simultaneous retries on this server share a single retrieval."""
+        """Serialize the same request across processes that share this SQLite workspace."""
         if request_id is None:
             yield
             return
-        key = (owner, request_id)
-        while True:
-            with self._running_lock:
-                running = self._running.get(key)
-                if running is None:
-                    self._running[key] = Future()
+        # A bounded set of files avoids accumulating one lock per turn. The OS
+        # releases the lock on disconnect, orderly shutdown or process death.
+        import errno
+        import os
+        lock_dir = self.path.parent / ".query-locks"
+        lock_dir.mkdir(exist_ok=True)
+        slot = hashlib.sha256(pack([owner, request_id]).encode()).hexdigest()[:3]
+        with (lock_dir / slot).open("a+b") as handle:
+            if os.name == "nt":
+                import msvcrt
+                def acquire():
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                def acquire():
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            while True:
+                try:
+                    acquire()
                     break
-            await asyncio.shield(asyncio.wrap_future(running))
-        try:
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                        raise
+                    await asyncio.sleep(0.08)
             yield
-        finally:
-            with self._running_lock:
-                self._running.pop(key).set_result(None)
 
     @staticmethod
     def completed_query(conn, owner, request_id):

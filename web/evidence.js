@@ -1,4 +1,5 @@
 // Evidence always belongs to the saved answer. Opening a source never runs retrieval.
+import { highlightedExcerpt } from "./answer.js";
 const escapeText = value => String(value ?? "").replace(/[&<>"']/g, character => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 })[character]);
@@ -8,6 +9,7 @@ let preview;
 let activeResult;
 let returnFocus;
 let activeTurn;
+let activeCitation;
 
 function glyph(name, size = 18) {
   const paths = {
@@ -33,6 +35,7 @@ function timestamp(value) {
 function documentBody(source) {
   const excerpt = source.excerpt || source.text;
   const location = source.locator || "未记录页码、章节或行号";
+  const occurrence = activeCitation?.id === String(source.id) ? activeCitation.occurrence : -1;
   let link = '<p class="ev-missing">缺少文档标识，无法打开原文。</p>';
   if (validId(source.document_id)) {
     const query = new URLSearchParams({id: source.document_id});
@@ -40,7 +43,9 @@ function documentBody(source) {
     link = `<a class="ev-read" href="/reader.html?${escapeText(query)}" target="_blank" rel="noopener">${glyph("book", 16)} 打开文档 ${glyph("arrow", 14)}</a>`;
   }
   return `<p class="ev-locator">${escapeText(location)}</p>
-    ${excerpt ? `<blockquote><mark>${escapeText(excerpt)}</mark></blockquote>` : '<p class="ev-missing">未保存原文片段。</p>'}${link}`;
+    ${source.source_key ? `<p class="ev-locator">资料来源 · ${escapeText(source.source_key)}</p>` : ""}
+    ${source.context ? `<p class="ev-locator">${escapeText(source.context)}</p>` : ""}
+    ${excerpt ? `<blockquote>${highlightedExcerpt(source, excerpt, occurrence)}</blockquote>` : '<p class="ev-missing">未保存原文片段。</p>'}${link}`;
 }
 
 function apiBody(source, result) {
@@ -50,7 +55,7 @@ function apiBody(source, result) {
     `<span class="ev-filter">${escapeText(item.label)} · ${escapeText(item.value)}</span>`).join("");
   const path = `/api/history/${encodeURIComponent(result.id)}/sources/${encodeURIComponent(source.id)}`;
   const rows = Array.isArray(source.rows) ? source.rows : null;
-  const number = source.total_count ?? rows?.length;
+  const number = source.returned_count ?? rows?.length ?? source.total_count;
   const details = rows?.length ? `<details class="ev-records"><summary>查看记录快照</summary>
     ${rows.slice(0, 3).filter(row => row && typeof row === "object").map(row => `<dl>${Object.entries(row).map(([k,v]) =>
       `<div><dt>${escapeText(k)}</dt><dd>${escapeText(typeof v === "object" ? JSON.stringify(v) : v)}</dd></div>`).join("")}</dl>`).join("")}
@@ -58,7 +63,9 @@ function apiBody(source, result) {
   const sql = typeof source.executed_sql === "string" && source.executed_sql.trim();
   return `<dl class="ev-api-meta"><dt>查询时间</dt><dd>${escapeText(timestamp(source.fetched_at))}</dd>
     ${source.metric_definition ? `<dt>指标口径</dt><dd>${escapeText(source.metric_definition)}</dd>` : ""}
-    <dt>筛选条件</dt><dd>${visibleFilters}</dd>${Number.isInteger(number) ? `<dt>返回记录</dt><dd>${number} 条</dd>` : ""}</dl>
+    <dt>筛选条件</dt><dd>${visibleFilters}</dd>${Number.isInteger(number) ? `<dt>本次返回</dt><dd>${number} 条</dd>` : ""}
+    ${source.returned_count != null && source.total_count != null ? `<dt>总记录数</dt><dd>${escapeText(source.total_count)} 条</dd>` : ""}
+    ${source.has_more === true ? "<dt>分页</dt><dd>仍有后续记录</dd>" : ""}</dl>
     ${details}${sql ? `<details class="ev-records"><summary>查看执行 SQL</summary><pre><code>${escapeText(sql)}</code></pre></details>` : ""}
     ${source.redacted ? '<p class="ev-missing">部分受限字段已隐藏。</p>' : ""}
     ${validId(result.id) && source.id && rows ? `<div class="ev-downloads">${[["rows","下载记录"],["raw","下载原始响应"]].map(([format, label]) =>
@@ -143,6 +150,9 @@ export function openEvidence(result, sourceId, opener) {
   mountPanel();
   if (returnFocus && returnFocus !== opener) returnFocus.setAttribute("aria-expanded", "false");
   returnFocus = opener || document.activeElement;
+  const siblings = Array.from(returnFocus.closest(".answer-copy")?.querySelectorAll(".inline-cite") || [])
+    .filter(button => button.dataset.citation === String(sourceId));
+  activeCitation = {id: String(sourceId), occurrence: siblings.indexOf(returnFocus)};
   activeTurn = returnFocus.closest("[data-answer-turn]")?.dataset.answerTurn;
   activeResult = result;
   const sources = result.citations || [];

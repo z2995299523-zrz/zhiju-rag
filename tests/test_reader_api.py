@@ -65,6 +65,25 @@ class ReaderApiTests(unittest.TestCase):
         self.assertEqual(self.admin.get(f"/api/documents/{new}/source-window", params=args).status_code, 404)
         self.assertEqual(self.ok(self.admin.get(root, params=args)), original)
 
+    def test_json_original_window_follows_escaped_pointer_beyond_initial_rows(self):
+        original = [{"a/b~": [f"entry-{i}"]} for i in range(40)]
+        for name, binary, prefix in (
+                ("compact.json", json.dumps(original).encode(), ""),
+                ("pretty.json", json.dumps(original, indent=2).encode(), ""),
+                ("events.jsonl", b'{}\n\n' + json.dumps(original).encode(), "第 3 行")):
+            doc = self.upload(name, binary)
+            selected = self.ok(self.admin.get(f"/api/documents/{doc}/preview", params={"q":"entry-39"}))["chunks"]
+            chunk, = selected
+            self.assertIn(prefix, chunk["locator"])
+            view = self.ok(self.admin.get(f"/api/documents/{doc}/source-window", params={"chunk_id":chunk["id"]}))
+            self.assertEqual(view["pointer"], "/39/a~1b~0/0")
+            self.assertIn("entry-39", view["rows"][0]["text"])
+            self.assertNotIn("entry-38", view["rows"][0]["text"])
+            if name == "pretty.json":
+                self.assertGreater(view["first"], 24)
+            elif prefix:
+                self.assertEqual(view["first"], 3)
+
     def test_import_comparison_xlsx_keeps_formula_blank_header_and_sheet_coordinates(self):
         from openpyxl import Workbook
         book = Workbook()
@@ -122,6 +141,9 @@ class ReaderApiTests(unittest.TestCase):
                 }))
             self.assertEqual(result["citations"][0]["filters"], [{"label": "货号", "value": "x"}])
             self.assertEqual(result["citations"][0]["rows"], [{"count": 6}])
+            self.assertEqual(result["citations"][0]["returned_count"], 1)
+            self.assertIsNone(result["citations"][0]["total_count"])
+            self.assertFalse(result["citations"][0]["complete"])
             self.assertNotIn("private-value", json.dumps(result))
             self.assertNotIn(url, json.dumps(result))
             # Existing databases contain request URLs and no filter-label snapshots.

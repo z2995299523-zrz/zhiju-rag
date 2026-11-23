@@ -1,4 +1,5 @@
 """Authenticated online reading of the exact document version stored at import."""
+import json
 import re
 from pathlib import Path
 from typing import Annotated
@@ -8,14 +9,14 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Path as PathParam
 from fastapi.responses import Response
 
 from . import access
-from .ingest_worker import UploadBusyError, inspect_sheet
+from .ingest_worker import UploadBusyError, inspect_json, inspect_sheet
 from .source_window import TEXT_FORMATS, text_window
 from .storage import DOC_FIELDS
 
 
 router = APIRouter(prefix="/api/documents", dependencies=[Depends(access.reader)])
 DocumentID = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
-SEARCH = " AND (instr(lower(text), lower(?)) > 0 OR instr(lower(locator), lower(?)) > 0)"
+SEARCH = " AND (instr(lower(text),lower(?))>0 OR instr(lower(locator),lower(?))>0 OR instr(lower(context),lower(?))>0)"
 
 
 def original_mime(filename, signature):
@@ -35,9 +36,9 @@ def preview(doc_id: DocumentID, request: Request, q: str = Query("", max_length=
             chunk_id: int | None = Query(None, ge=1, le=2**63 - 1)):
     term = q.strip()
     condition = " WHERE document_id=?" + (SEARCH if term else "")
-    params = (doc_id, term, term) if term else (doc_id,)
+    params = (doc_id, term, term, term) if term else (doc_id,)
     with request.app.state.store.db() as conn:
-        doc = conn.execute(f"SELECT {DOC_FIELDS}, active, substr(content,1,12) AS sig FROM documents WHERE id=?",
+        doc = conn.execute(f"SELECT {DOC_FIELDS}, report,recipe,active, substr(content,1,12) AS sig FROM documents WHERE id=?",
                            (doc_id,)).fetchone()
         if doc is None:
             raise HTTPException(404, "文档不存在")
@@ -55,9 +56,11 @@ def preview(doc_id: DocumentID, request: Request, q: str = Query("", max_length=
                                       (*params, chunk_id)).fetchone()[0]
                 offset = (before // limit) * limit
         offset = min(offset, (max(total - 1, 0) // limit) * limit)
-        chunks = conn.execute("SELECT id,locator,text FROM chunks" + condition + " ORDER BY id LIMIT ? OFFSET ?",
+        chunks = conn.execute("SELECT id,locator,text,context FROM chunks" + condition + " ORDER BY id LIMIT ? OFFSET ?",
                               (*params, limit, offset)).fetchall()
     meta = dict(doc)
+    meta.update(json.loads(meta.pop("report")))
+    meta["options"] = json.loads(meta.pop("recipe")).get("options", {})
     mime = original_mime(meta["filename"], meta.pop("sig"))
     meta["active"] = bool(meta["active"])
     kind = ("pdf" if mime == "application/pdf" else "image") if mime else None
@@ -67,9 +70,10 @@ def preview(doc_id: DocumentID, request: Request, q: str = Query("", max_length=
 
 
 @router.get("/{doc_id}/source-window", dependencies=[Depends(access.admin)])
-def source_window(doc_id: DocumentID, request: Request, chunk_id: int = Query(ge=1, le=2**63 - 1)):
+def source_window(doc_id: DocumentID, request: Request, chunk_id: int = Query(ge=1, le=2**63 - 1),
+                  column: int | None = Query(None, ge=1, le=512)):
     with request.app.state.store.db() as conn:
-        row = conn.execute("""SELECT d.filename,c.locator FROM documents d JOIN chunks c ON c.document_id=d.id
+        row = conn.execute("""SELECT d.filename,c.locator,c.metadata FROM documents d JOIN chunks c ON c.document_id=d.id
                               WHERE d.id=? AND c.id=?""", (doc_id, chunk_id)).fetchone()
         if row is None:
             raise HTTPException(404, "此分块不属于该文档版本")
@@ -82,8 +86,21 @@ def source_window(doc_id: DocumentID, request: Request, chunk_id: int = Query(ge
             header = conn.execute("SELECT locator FROM chunks WHERE document_id=? ORDER BY id LIMIT 1",
                                   (doc_id,)).fetchone()[0]
     try:
+        metadata = json.loads(row["metadata"])
         if suffix == ".xlsx":
-            return inspect_sheet(data, row["locator"])
+            view = inspect_sheet(data, row["locator"], start_column=column, header_rows=metadata.get("header_rows", []))
+            view["fields"] = [{"column":cell["column"], "address":cell["address"], "label":cell["label"][:160]}
+                              for cell in metadata.get("cells", [])]
+            return view
+        if suffix in {".json", ".jsonl", ".ndjson"}:
+            locator = row["locator"]
+            pointer = metadata.get("pointer")
+            if pointer is None:
+                pointer = re.sub(r" · 文本字符 \d+–\d+$", "", locator.partition(" · JSON Pointer ")[2])
+            line = re.match(r"第 (\d+) 行", locator)
+            return inspect_json(data, suffix, pointer, int(line[1]) if line else None)
+        if metadata.get("header_rows") and suffix in {".csv", ".tsv"}:
+            return text_window(data, row["locator"], header_rows=metadata["header_rows"])
         return text_window(data, row["locator"], header, plain=suffix in {".md", ".txt"})
     except UploadBusyError as exc:
         raise HTTPException(503, str(exc)) from exc

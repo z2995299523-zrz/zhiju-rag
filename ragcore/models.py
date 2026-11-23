@@ -13,14 +13,15 @@ import threading
 import time
 from array import array
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Any
 from urllib import error, request
 
 import httpx
-from .answer_blocks import AnswerBlocks, INSTRUCTION, InsufficientEvidence, ModelAnswerError, evidence_sources
+from .answer_blocks import AnswerBlocks, EvidenceMismatch, INSTRUCTION, InsufficientEvidence, ModelAnswerError, evidence_sources
 from .model_config import ConfigError, Settings as _Settings, effective as _settings
-from .query_trace import stage_note
+from .query_trace import stage_metrics, stage_note
 
 
 def model_enabled() -> bool:
@@ -61,8 +62,9 @@ _MODEL_ERRORS = (OSError, ValueError, TypeError, KeyError, IndexError, OverflowE
                  RecursionError, http.client.HTTPException)
 
 
-def probe(kind, settings):
+def probe(kind, settings, *, concurrent_batches=False):
     started = time.monotonic()
+    details = {}
     try:
         if kind == "llm":
             response = _post(settings, "/chat/completions", {"model": settings.model, "max_tokens": 16,
@@ -71,14 +73,20 @@ def probe(kind, settings):
             if not isinstance(text, str) or not text.strip():
                 raise ValueError
             message = "对话模型已返回有效回答。"
+        elif concurrent_batches:
+            batches = [[f"向量诊断 第 {group} 批 第 {i} 段" for i in range(1, _BATCH + 1)] for group in (1, 2)]
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                requests = [pool.submit(_request_vectors, settings, batch, 7) for batch in batches]
+                results = [task.result() for task in requests]
+            dimension = len(results[0][0])
+            if len(results[1][0]) != dimension:
+                raise ValueError("Embedding dimensions differ between requests")
+            details = {"batches": len(batches), "batch_size": _BATCH, "dimension": dimension}
+            message = f"并发提交两批诊断文本，每批 {_BATCH} 条，均返回 {dimension} 维向量。"
         else:
-            response = _post(settings, "/embeddings", {"model": settings.model, "input": ["连接测试"]},
-                             timeout=7, size=512_000)
-            item, = response["data"]
-            if type(item["index"]) is not int or item["index"] != 0:
-                raise ValueError
-            vector = _vector(item["embedding"])
-            message = f"向量模型已返回 {len(vector)} 维向量。"
+            inputs = ["查询资料", "文档片段一", "文档片段二"]
+            vectors = _request_vectors(settings, inputs, 7)
+            message = f"向量模型批量测试通过，{len(inputs)} 条输入各返回 {len(vectors[0])} 维向量。"
     except error.HTTPError as exc:
         if exc.code in (401, 403):
             raise ConfigError("模型服务拒绝了凭据或访问权限，请检查 API Key 和模型授权。") from None
@@ -89,7 +97,7 @@ def probe(kind, settings):
         raise ConfigError("模型服务连接失败或超时，请检查地址、网络和证书。") from None
     except (ValueError, TypeError, KeyError, IndexError, OverflowError, RecursionError):
         raise ConfigError("服务响应格式无效，请确认服务支持对应的对话或向量接口。") from None
-    return {"ok": True, "message": message, "latency_ms": round((time.monotonic() - started) * 1000)}
+    return {"ok": True, "message": message, "latency_ms": round((time.monotonic() - started) * 1000), **details}
 
 
 def _chat_json(settings: _Settings, instruction: str, data: dict, tokens: int) -> dict:
@@ -112,16 +120,14 @@ def _parameter_literal(question: str, raw: str, kind: str):
         raise ValueError("Parameter must be an exact span of the question")
     if kind == "string":
         return raw
-    if not re.search(r"(?<![.\d+-])" + re.escape(raw) + r"(?![.\d])", question):
+    if not re.search(r"(?<![.\d+eE-])" + re.escape(raw) + r"(?![.\d]|[eE][+-]?\d)", question):
         raise ValueError("Partial numeric or date parameter")
     if kind == "integer" and re.fullmatch(r"[+-]?[0-9]{1,19}", raw):
         number = int(raw)
         if -(2**63) <= number < 2**63:
             return number
-    if kind == "number" and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)", raw):
-        number = float(raw)
-        if math.isfinite(number):
-            return number
+    if kind == "number" and len(raw) <= 100 and re.fullmatch(r"[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", raw):
+        return raw
     if kind == "date" and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", raw):
         return date.fromisoformat(raw).isoformat()
     raise ValueError("Invalid parameter literal")
@@ -199,6 +205,10 @@ def _answer_payload(settings, question, sources, *, stream=False):
     return payload
 
 
+class RejectedAnswer(ModelAnswerError):
+    """The provider returned text that failed the grounded answer protocol."""
+
+
 def synthesize(question: str, citations: list[dict]) -> str | None:
     """Verify the same supported paragraphs used by the streaming route."""
     settings = _settings("LLM")
@@ -207,29 +217,55 @@ def synthesize(question: str, citations: list[dict]) -> str | None:
     sources = evidence_sources(citations, question)
     if not sources or not question.strip():
         raise InsufficientEvidence()
-    blocks = AnswerBlocks(sources, question)
+    blocks = AnswerBlocks(sources, question, citations)
+    started = time.monotonic()
     try:
         response = _post(settings, "/chat/completions", _answer_payload(settings, question, sources),
-                         timeout=40, size=128_000)
+                         timeout=75, size=128_000)
+        stage_metrics(first_upstream_ms=round((time.monotonic() - started) * 1000))
         choice = response["choices"][0]
         if not isinstance(choice, dict) or choice.get("finish_reason") not in (None, "stop"):
             raise ModelAnswerError("模型回答不完整。")
         content = choice["message"]["content"]
         if not isinstance(content, str):
             raise ModelAnswerError("模型回答格式无效。")
-        answer = "".join(blocks.feed(content))
+        try:
+            answer = "".join(blocks.feed(content))
+        except EvidenceMismatch as exc:
+            if choice.get("finish_reason") == "stop":
+                raise RejectedAnswer(str(exc)) from exc
+            raise
         blocks.finish()
+        stage_metrics(first_verified_ms=round((time.monotonic() - started) * 1000), upstream_outcome="complete")
         return answer
-    except (InsufficientEvidence, ModelAnswerError):
+    except InsufficientEvidence:
+        stage_metrics(upstream_outcome="insufficient")
         raise
-    except _MODEL_ERRORS:
+    except ModelAnswerError:
+        stage_metrics(upstream_outcome="validation")
+        raise
+    except _MODEL_ERRORS as exc:
+        stage_metrics(upstream_outcome=_failure_kind(exc))
         raise ModelAnswerError("模型服务未完成回答，请重试。") from None
 
 
 _VECTORS: OrderedDict[tuple[str, str, bytes, bytes], array] = OrderedDict()
 _VECTOR_LOCK = threading.Lock()
+_VECTOR_SLOTS = threading.BoundedSemaphore(3)
 _MAX_CACHE = 2048
-_BATCH = 32
+_BATCH = 8
+
+
+def _failure_kind(exc):
+    if isinstance(exc, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if isinstance(exc, error.HTTPError):
+        return f"http_{exc.code}"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"http_{exc.response.status_code}"
+    if isinstance(exc, (OSError, httpx.TransportError, http.client.HTTPException)):
+        return "transport"
+    return "invalid_response"
 
 
 async def _chat_deltas(response):
@@ -286,25 +322,52 @@ async def stream_answer(question: str, citations: list[dict]):
     sources = evidence_sources(citations, question)
     if not sources or not question.strip():
         raise InsufficientEvidence()
-    blocks = AnswerBlocks(sources, question)
+    blocks = AnswerBlocks(sources, question, citations)
     payload = _answer_payload(settings, question, sources, stream=True)
     headers = {"Accept": "text/event-stream", "Accept-Encoding": "identity"}
     if settings.token:
         headers["Authorization"] = "Bearer " + settings.token
+    started = time.monotonic()
+    first_delta = True
+    first_paragraph = True
+    rejected = None
     try:
         direct = {settings.local_origin: None} if settings.local_origin else None
-        async with asyncio.timeout(45), httpx.AsyncClient(timeout=12, follow_redirects=False, mounts=direct) as client:
+        # Allow a longer total budget for multi-part answers while retaining an idle-read timeout.
+        async with asyncio.timeout(90), httpx.AsyncClient(timeout=20, follow_redirects=False, mounts=direct) as client:
             async with client.stream("POST", settings.base + "/chat/completions", json=payload, headers=headers) as response:
                 response.raise_for_status()
                 if response.headers.get("content-type", "").split(";")[0].strip().lower() != "text/event-stream":
                     raise ValueError("Expected model event stream")
                 async for delta in _chat_deltas(response):
-                    for block in blocks.feed(delta):
-                        yield block
+                    if first_delta:
+                        stage_metrics(first_upstream_ms=round((time.monotonic() - started) * 1000))
+                        first_delta = False
+                    if rejected is None:
+                        try:
+                            for block in blocks.feed(delta):
+                                if first_paragraph:
+                                    stage_metrics(first_verified_ms=round((time.monotonic() - started) * 1000))
+                                    first_paragraph = False
+                                yield block
+                        except EvidenceMismatch as exc:
+                            if not first_paragraph:
+                                raise
+                            # Drain the upstream protocol before considering a local lookup.
+                            # A truncated response, timeout, or disconnect remains an error.
+                            rejected = exc
+        if rejected is not None:
+            raise RejectedAnswer(str(rejected)) from rejected
         blocks.finish()
-    except (InsufficientEvidence, ModelAnswerError):
+        stage_metrics(upstream_outcome="complete")
+    except InsufficientEvidence:
+        stage_metrics(upstream_outcome="insufficient")
         raise
-    except (httpx.HTTPError, *_MODEL_ERRORS):
+    except ModelAnswerError:
+        stage_metrics(upstream_outcome="validation")
+        raise
+    except (httpx.HTTPError, *_MODEL_ERRORS) as exc:
+        stage_metrics(upstream_outcome=_failure_kind(exc))
         raise ModelAnswerError("模型回答中断，请重试。") from None
 
 
@@ -319,38 +382,55 @@ def _vector(values: list) -> array:
     return array("f", (v / norm for v in values))
 
 
+def _request_vectors(settings, inputs, timeout):
+    response = _post(settings, "/embeddings", {"model": settings.model, "input": inputs},
+                     timeout=timeout, size=8_000_000)
+    data = response["data"]
+    if not isinstance(data, list) or len(data) != len(inputs):
+        raise ValueError("Incomplete embedding response")
+    indices = [item["index"] for item in data]
+    if any(type(i) is not int for i in indices) or set(indices) != set(range(len(inputs))):
+        raise ValueError("Invalid embedding indices")
+    vectors = [_vector(item["embedding"]) for item in sorted(data, key=lambda d: d["index"])]
+    if len({len(v) for v in vectors}) != 1:
+        raise ValueError("Embedding dimensions do not match")
+    return vectors
+
+
 def _embed(settings: _Settings, inputs: list[str]) -> list[array]:
     account = hashlib.sha256(settings.token.encode()).digest()
     keys = [(settings.base, settings.model, account, hashlib.sha256(s.encode()).digest()) for s in inputs]
-    pending = {key: value for key, value in zip(keys, inputs) if key not in _VECTORS}
+    with _VECTOR_LOCK:
+        validated = {key: _VECTORS[key] for key in keys if key in _VECTORS}
+    pending = {key: value for key, value in zip(keys, inputs) if key not in validated}
     items = list(pending.items())
-    deadline = time.monotonic() + 14
-    validated = {key: _VECTORS[key] for key in keys if key in _VECTORS}
-    for offset in range(0, len(items), _BATCH):
-        batch = items[offset:offset + _BATCH]
+    deadline = time.monotonic() + 18
+    batch_size, offset, calls = _BATCH, 0, 0
+    while offset < len(items):
+        batch = items[offset:offset + batch_size]
         left = deadline - time.monotonic()
         if left <= 0:
             raise TimeoutError("Embedding time budget exhausted")
-        response = _post(settings, "/embeddings", {
-            "model": settings.model, "input": [v for _, v in batch],
-        }, timeout=min(6.0, left), size=8_000_000)
-        data = response["data"]
-        if not isinstance(data, list) or len(data) != len(batch):
-            raise ValueError("Incomplete embedding response")
-        indices = [item["index"] for item in data]
-        if any(type(i) is not int for i in indices) or set(indices) != set(range(len(batch))):
-            raise ValueError("Invalid embedding indices")
-        for item in data:
-            key = batch[item["index"]][0]
-            validated[key] = _vector(item["embedding"])
+        calls += 1
+        stage_metrics(embedding_batch_size=len(batch), embedding_batches=calls)
+        try:
+            vectors = _request_vectors(settings, [v for _, v in batch], min(7, left))
+        except error.HTTPError as exc:
+            if exc.code not in (400, 413, 422) or len(batch) <= 1:
+                raise
+            batch_size = max(1, len(batch) // 2)
+            continue
+        with _VECTOR_LOCK:
+            for (key, _), vector in zip(batch, vectors):
+                validated[key] = _VECTORS[key] = vector
+                _VECTORS.move_to_end(key)
+            while len(_VECTORS) > _MAX_CACHE:
+                _VECTORS.popitem(last=False)
+        offset += len(batch)
     vectors = [validated[k] for k in keys]
     if len({len(v) for v in vectors}) != 1:
         raise ValueError("Embedding dimensions do not match")
-    for key in keys:
-        _VECTORS[key] = validated[key]
-        _VECTORS.move_to_end(key)
-    while len(_VECTORS) > _MAX_CACHE:
-        _VECTORS.popitem(last=False)
+    stage_metrics(embedding_dimension=len(vectors[0]), embedding_cache_hits=len(keys) - len(pending))
     return vectors
 
 
@@ -361,15 +441,18 @@ def semantic_rank(question: str, chunks: list[dict], limit: int = 5) -> list[dic
         return None
     if not chunks or not question.strip() or limit < 1:
         return []
-    if not _VECTOR_LOCK.acquire(timeout=0.05):
+    if not _VECTOR_SLOTS.acquire(timeout=0.2):
         stage_note("embedding_busy")
+        stage_metrics(embedding_outcome="busy")
         return None
     try:
         candidates = [c for c in chunks if str(c.get("text") or "").strip()]
         if not candidates:
             return []
         inputs = [question.strip()[:1600]]
-        inputs.extend(f"{str(c.get('filename') or '')[:150]}\n{str(c['text'])[:1600]}" for c in candidates)
+        from .retrieval import structural_text
+        inputs.extend(f"{str(c.get('filename') or '')[:150]}\n{structural_text(c)[:600]}\n{str(c['text'])[:1200]}"
+                      for c in candidates)
         query, *vectors = _embed(settings, inputs)
         threshold = float(os.getenv("RAG_EMBED_MIN_SCORE", "0.50"))
         if not math.isfinite(threshold) or not -1 <= threshold <= 1:
@@ -380,9 +463,11 @@ def semantic_rank(question: str, chunks: list[dict], limit: int = 5) -> list[dic
             if score >= threshold:
                 ranked.append({**chunk, "semantic_score": score, "score": score})
         ranked.sort(key=lambda c: c["score"], reverse=True)
+        stage_metrics(embedding_outcome="ranked" if ranked else "below_threshold")
         return ranked[:limit]
-    except _MODEL_ERRORS:
+    except _MODEL_ERRORS as exc:
         stage_note("lexical_fallback")
+        stage_metrics(embedding_outcome=_failure_kind(exc))
         return None
     finally:
-        _VECTOR_LOCK.release()
+        _VECTOR_SLOTS.release()

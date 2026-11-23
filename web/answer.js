@@ -2,6 +2,23 @@ const escape = value => String(value ?? "").replace(/[&<>"']/g, ch => ({
   "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
 })[ch]);
 
+export function highlightedExcerpt(source, text, occurrence = -1) {
+  const highlights = source.highlights || [];
+  if (!highlights.length) return `<mark>${escape(text)}</mark>`;
+  const selected = highlights[occurrence] ? [highlights[occurrence]] : highlights;
+  const chars = Array.from(text);
+  const ranges = selected.flatMap(h => h.ranges || []).filter(r => Number.isInteger(r.start) &&
+    Number.isInteger(r.end) && r.start >= 0 && r.end > r.start && r.end <= chars.length).sort((a,b) => a.start - b.start);
+  let cursor = 0, html = "";
+  for (const {start,end} of ranges) {
+    if (end <= cursor) continue;
+    html += escape(chars.slice(cursor, Math.max(start, cursor)).join(""));
+    html += `<mark>${escape(chars.slice(Math.max(start, cursor), end).join(""))}</mark>`;
+    cursor = end;
+  }
+  return html + escape(chars.slice(cursor).join(""));
+}
+
 function inline(text, citations, allowShortRefs) {
   const token = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\*[^*\n]+\*|\[(?:S)?\d+\]|【(?:S)?\d+】)/g;
   return text.split(token).map((part, index) => {

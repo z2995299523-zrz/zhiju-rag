@@ -23,13 +23,15 @@ from starlette.datastructures import UploadFile
 from ragcore import __version__, access, model_config, models
 from ragcore.connectors import ConnectorError, execute, validate_config
 from ragcore.documents import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS
-from ragcore.engine import answer_query, display_fields, query_events, query_examples, workspace_answer
+from ragcore.import_schema import ImportOptions, PARSER_VERSION
+from ragcore.ingest_worker import UploadBusyError, parse_upload_report
+from ragcore.engine import display_fields, query_events, query_examples, workspace_answer
 from ragcore.model_secrets import CredentialError
 from ragcore.query_trace import recent_traces
 from ragcore.ocr import IMAGE_EXTENSIONS, available as ocr_available
 from ragcore.preview import router as preview_router
 from ragcore.retrieval_check import router as retrieval_check_router
-from ragcore.storage import DOC_FIELDS, ImportParseError, RequestConflict, Store, pack, validate_parent
+from ragcore.storage import DOC_FIELDS, ImportParseError, RequestConflict, StaleImport, Store, pack, validate_parent
 from ragcore.workspace_id import workspace_id
 
 
@@ -167,9 +169,11 @@ def create_app(data_dir=None, seed=None):
 
     @app.post("/api/admin/models/{kind}/test")
     def probe_model(kind: model_config.Kind, request: Request, payload: model_config.ModelDraft | None = None,
-                    actor=Depends(access.admin)):
+                    concurrent_batches: bool = False, actor=Depends(access.admin)):
+        if concurrent_batches and kind != "embedding":
+            raise model_config.ConfigError("并发分批测试仅适用于向量模型。")
         settings = model_config.probe_settings(request.app.state.store, kind, payload)
-        return models.probe(kind, settings)
+        return models.probe(kind, settings, concurrent_batches=concurrent_batches)
 
     @app.exception_handler(model_config.ConfigError)
     @app.exception_handler(CredentialError)
@@ -187,12 +191,21 @@ def create_app(data_dir=None, seed=None):
         ocr_enabled = ocr_available()
         available_formats = SUPPORTED_EXTENSIONS if ocr_enabled else SUPPORTED_EXTENSIONS - IMAGE_EXTENSIONS
         return {"extensions": sorted(available_formats), "max_file_bytes": MAX_FILE_BYTES,
-                "max_files": 8, "ocr_enabled": ocr_enabled}
+                "max_files": 8, "ocr_enabled": ocr_enabled, "parser_version": PARSER_VERSION}
 
+    @app.post("/api/documents/inspect")
     @app.post("/api/documents")
     async def upload(request: Request, actor=Depends(access.admin)):
         imported, errors = [], []
-        async with request.form(max_files=8, max_fields=1) as form:
+        inspect = request.url.path.endswith("/inspect")
+        async with request.form(max_files=8, max_fields=2) as form:
+            try:
+                options = ImportOptions.model_validate_json(form.get("options", "{}")).model_dump(exclude_defaults=True)
+            except (ValueError, TypeError):
+                raise HTTPException(422, "解析设置无效，请检查表头行和隐藏内容选项") from None
+            source_key = form.get("source_key", "")
+            if not isinstance(source_key, str) or len(source_key) > 128 or any(ord(c) < 32 for c in source_key):
+                raise HTTPException(422, "资料来源名称无效")
             files = form.getlist("files")
             if not files or any(not isinstance(f, UploadFile) for f in files):
                 raise HTTPException(422, "请用 files 字段上传至少一个文件")
@@ -206,14 +219,61 @@ def create_app(data_dir=None, seed=None):
                     content = await file.read(MAX_FILE_BYTES + 1)
                     if len(content) > MAX_FILE_BYTES:
                         raise ValueError("单文件超过 20 MiB")
-                    result = await run_in_threadpool(request.app.state.store.ingest, filename, content, access.audit_actor(actor))
+                    if inspect:
+                        result = await run_in_threadpool(parse_upload_report, filename, content, options)
+                        chunks = result.pop("chunks")
+                        result.update(filename=filename, chunk_count=len(chunks), sample=chunks[:6])
+                    else:
+                        result = await run_in_threadpool(request.app.state.store.ingest, filename, content,
+                                                         access.audit_actor(actor), source_key=source_key, options=options)
                     imported.append(result)
                 except ValueError as exc:
                     error = {"filename": filename, "error": str(exc), "message": str(exc)}
                     if isinstance(exc, ImportParseError):
                         error["parse_ms"] = exc.elapsed_ms
+                    code = getattr(exc, "code", "busy" if isinstance(exc, UploadBusyError) else "invalid_document")
+                    error.update(code=code, retryable=code == "busy")
                     errors.append(error)
         return {"imported": imported, "errors": errors}
+
+    @app.post("/api/documents/{doc_id}/reindex")
+    def reindex(doc_id: int, request: Request, options: ImportOptions | None = None, actor=Depends(access.admin)):
+        try:
+            return request.app.state.store.reindex(doc_id, access.audit_actor(actor),
+                                                  options.model_dump(exclude_defaults=True) if options else None)
+        except StaleImport as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ImportParseError as exc:
+            raise HTTPException(503 if exc.code == "busy" else 422, str(exc)) from exc
+
+    @app.get("/api/documents/{doc_id}/versions")
+    def document_versions(doc_id: int, request: Request, actor=Depends(access.admin)):
+        with request.app.state.store.db() as conn:
+            source = conn.execute("SELECT source_key,filename FROM documents WHERE id=? AND active=1",
+                                  (doc_id,)).fetchone()
+            if source is None:
+                raise HTTPException(409, "资料已更新或停用，请刷新后选择当前版本")
+            rows = conn.execute(f"SELECT {DOC_FIELDS},active FROM documents WHERE source_key=? AND filename=? ORDER BY id DESC",
+                                tuple(source)).fetchall()
+        return [dict(r) for r in rows]
+
+    @app.post("/api/documents/{doc_id}/restore/{version_id}")
+    def restore_document(doc_id: int, version_id: int, request: Request, actor=Depends(access.admin)):
+        with request.app.state.store.db() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            source = conn.execute("SELECT source_key,filename FROM documents WHERE id=? AND active=1",
+                                  (doc_id,)).fetchone()
+            if source is None:
+                raise HTTPException(409, "资料已更新或停用，请刷新后选择当前版本")
+            version = conn.execute(f"SELECT {DOC_FIELDS} FROM documents WHERE id=? AND source_key=? AND filename=?",
+                                   (version_id, *source)).fetchone()
+            if version is None:
+                raise HTTPException(404, "未找到该资料的指定版本")
+            if version_id != doc_id:
+                conn.execute("UPDATE documents SET active=0 WHERE id=?", (doc_id,))
+                conn.execute("UPDATE documents SET active=1 WHERE id=?", (version_id,))
+                Store.audit(conn, access.audit_actor(actor), "document.restore", f"{doc_id}/{version_id}")
+            return dict(version)
 
     @app.delete("/api/documents/{doc_id}")
     def remove_document(doc_id: int, request: Request, actor=Depends(access.admin)):
@@ -278,27 +338,11 @@ def create_app(data_dir=None, seed=None):
             raise HTTPException(404, "数据接口不存在")
         return execute(config, payload.params)
 
-    @app.post("/api/query")
-    def query(payload: Question, request: Request, actor=Depends(access.reader)):
-        if not payload.question.strip():
-            raise HTTPException(422, "请输入问题")
-        try:
-            result = answer_query(request.app.state.store, actor["owner"], payload.question.strip(),
-                                  payload.mode, payload.params, payload.connector_id)
-            return workspace_answer(result, show_sql=actor["role"] == "admin")
-        except models.ModelAnswerError as exc:
-            raise HTTPException(502, "回答生成中断，请重试。") from exc
-        except KeyError as exc:
-            if exc.args == ("数据接口不存在",):
-                raise HTTPException(404, exc.args[0]) from None
-            raise
-
     @app.get("/api/query/examples")
     def examples(request: Request, actor=Depends(access.reader)):
         return query_examples(request.app.state.store)
 
-    @app.post("/api/query/stream")
-    def stream_query(payload: Question, request: Request, actor=Depends(access.reader)):
+    def prepare_turn(payload, request, actor, *, stream_model):
         question = payload.question.strip()
         if not question:
             raise HTTPException(422, "请输入问题")
@@ -315,22 +359,45 @@ def create_app(data_dir=None, seed=None):
         except RequestConflict as exc:
             raise HTTPException(409, str(exc)) from None
 
+        async def execute_turn():
+            async with store.query_turn(owner, request_id):
+                if request_id:
+                    with store.db() as conn:
+                        archived = store.completed_query(conn, owner, request_id)
+                    if archived:
+                        yield "done", {"result": workspace_answer(archived, show_sql=actor["role"] == "admin")}
+                        return
+                events = query_events(store, owner, question, payload.mode, payload.params, payload.connector_id,
+                                      parent_id=payload.parent_id, show_sql=actor["role"] == "admin",
+                                      stream_model=stream_model, request_id=request_id)
+                async with aclosing(events):
+                    async for event in events:
+                        yield event
+        return execute_turn()
+
+    @app.post("/api/query")
+    async def query(payload: Question, request: Request, actor=Depends(access.reader)):
+        events = await run_in_threadpool(prepare_turn, payload, request, actor, stream_model=False)
+        try:
+            async with aclosing(events):
+                async for name, data in events:
+                    if name == "done":
+                        return data["result"]
+        except models.ModelAnswerError as exc:
+            raise HTTPException(502, "回答生成中断，请重试。") from exc
+        except KeyError as exc:
+            if exc.args == ("数据接口不存在",):
+                raise HTTPException(404, exc.args[0]) from None
+            raise
+
+    @app.post("/api/query/stream")
+    def stream_query(payload: Question, request: Request, actor=Depends(access.reader)):
+        events = prepare_turn(payload, request, actor, stream_model=True)
         async def body():
             try:
-                async with store.query_turn(owner, request_id):
-                    if request_id:
-                        with store.db() as conn:
-                            archived = store.completed_query(conn, owner, request_id)
-                        if archived:
-                            data = {"result": workspace_answer(archived, show_sql=actor["role"] == "admin")}
-                            yield f"event: done\ndata: {pack(data)}\n\n"
-                            return
-                    events = query_events(store, owner, question, payload.mode, payload.params, payload.connector_id,
-                                          parent_id=payload.parent_id, show_sql=actor["role"] == "admin",
-                                          request_id=request_id)
-                    async with aclosing(events):
-                        async for name, data in events:
-                            yield f"event: {name}\ndata: {pack(data)}\n\n"
+                async with aclosing(events):
+                    async for name, data in events:
+                        yield f"event: {name}\ndata: {pack(data)}\n\n"
             except Exception as exc:
                 message = "回答生成中断，请重试。"
                 if isinstance(exc, KeyError) and exc.args == ("数据接口不存在",):

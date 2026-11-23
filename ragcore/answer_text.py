@@ -49,8 +49,15 @@ def _named_description(fields, question):
 def data_paragraphs(source, question):
     rows = source["rows"]
     cite = f" [{source['id']}]"
+    total = source.get("total_count")
+    if source.get("has_more") is True or (total is not None and total > len(rows)):
+        scope = f"，上游报告总计 {total} 条" if total is not None else "，后续仍有记录"
+        yield f"本页返回 {len(rows)} 条记录{scope}。" + cite
+        if not rows:
+            return
     if not rows:
-        yield "按当前筛选条件查询到 0 条记录。" + cite
+        yield ("本次接口返回 0 条记录。" if source.get("complete") is False else
+               "按当前筛选条件查询到 0 条记录。") + cite
         return
     row = rows[0]
     if (source.get("demo") and len(rows) == 1 and "执行率" in question and
@@ -80,6 +87,20 @@ def data_paragraphs(source, question):
 
 def _document_text(question, source):
     excerpt = source["excerpt"].strip()
+    if "（表头）" in str(source.get("locator", "")) and not re.search(r"表头|字段名|列名|column names|headers", question, re.I):
+        return ""
+    asks_value = re.search(r"多少|多高|多远|多长|几(?:元|天|年|人|次|个|件|公里)|how (?:much|many)", question, re.I)
+    if asks_value and not re.search(r"\d|[零一二三四五六七八九十两百千万]+\s*(?:元|天|年|人|次|个|件|公里|米)|不限|无上限|不设上限", excerpt):
+        return ""
+    field_checks = (
+        (r"负责人|由谁|谁负责|责任人|who (?:is responsible|owns)", r"负责人|负责[人部]|由.{1,24}(?:负责|审批|办理)|责任人|owner|responsib"),
+        (r"截止日期|截止时间|哪天截止|何时截止|deadline", r"截止|最迟|到期|deadline|due date"),
+        (r"联系电话|电话号码|联系方式中的电话|phone number", r"\d[\d ()+-]{5,}\d"),
+        (r"电子邮箱|邮件地址|email address", r"[\w.+-]+@[\w.-]+\.\w+"),
+    )
+    for requested, supported in field_checks:
+        if re.search(requested, question, re.I) and not re.search(supported, excerpt, re.I):
+            return ""
     if excerpt.startswith("{"):
         try:
             fields = json.loads(excerpt)
@@ -103,13 +124,15 @@ def _document_text(question, source):
 
 def document_paragraphs(question, sources):
     paragraphs = []
-    different_documents = len({s["title"] for s in sources}) > 1
+    different_documents = len({(s.get("source_key"), s["title"]) for s in sources}) > 1
     for source in sources:
         text = _document_text(question, source)
         if not text:
             continue
-        if different_documents:
+        if different_documents or source.get("source_key"):
             title = Path(source["title"]).stem
+            if source.get("source_key"):
+                title = f"{source['source_key']} · {title}"
             text = f"《{title}》记载：{text}"
         paragraphs.append(f"{text} [{source['id']}]")
     return paragraphs

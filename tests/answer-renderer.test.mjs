@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { renderMarkdown } from "../web/answer.js";
+import { renderMarkdown, highlightedExcerpt } from "../web/answer.js";
+
+test("two inline citations on the same source highlight separate original ranges including non-BMP text", () => {
+  const text = "📄头<原件>甲与乙";
+  const source = { highlights:[{ranges:[{start:6,end:7}]},{ranges:[{start:8,end:9}]}] };
+  assert.equal(highlightedExcerpt(source,text,0), "📄头&lt;原件&gt;<mark>甲</mark>与乙");
+  assert.equal(highlightedExcerpt(source,text,1), "📄头&lt;原件&gt;甲与<mark>乙</mark>");
+  assert.equal(highlightedExcerpt(source,text), "📄头&lt;原件&gt;<mark>甲</mark>与<mark>乙</mark>");
+  assert.equal(highlightedExcerpt({},text), "<mark>📄头&lt;原件&gt;甲与乙</mark>");
+});
 
 function render(answer, citations = [], incomplete = false) {
   const blocks = [];

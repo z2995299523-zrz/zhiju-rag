@@ -1,8 +1,8 @@
 # 知据 · 企业知识工作台
 
-在同一条问答里查制度原文和业务数据。文件答案可回到页、行、工作表或段落，业务数值可回到当次只读接口请求和返回记录。标准版 **v1.4.1** 包含中文 Web 工作台、FastAPI 服务和 SQLite 存储。新工作区默认空白，导入资料后即可使用本地检索。管理员可随时接入对话模型和向量模型。
+在同一条问答里查制度原文和业务数据。文件答案可回到页、行、工作表或段落，业务数值可回到当次只读接口请求和返回记录。标准版 **v1.5.0** 包含中文 Web 工作台、FastAPI 服务和 SQLite 存储。新工作区默认空白，导入资料后即可使用本地检索。管理员可随时接入对话模型和向量模型。
 
-按行业交付时可复用同一版本，分别设置数据目录、模型、初始资料、只读业务接口和验收题。[行业模板与部署示例](docs/industry-profiles.md) · [五个高星 RAG 项目调研](docs/rag-projects.md)
+按行业交付时可复用同一版本，分别设置数据目录、模型、初始资料、只读业务接口和验收题。[行业模板与部署示例](docs/industry-profiles.md) · [五个高星 RAG 项目调研](docs/rag-projects.md) · [v1.5.0 整改与验收](docs/v1.5.0-整改验收.md)
 
 ## 本机启动
 
@@ -55,7 +55,7 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8781 --no-proxy-headers
 | PDF、DOCX、PPTX | PDF 页码、Word 段落或表格、幻灯片编号 |
 | 启用 OCR 后的 PNG、JPG/JPEG、TIF/TIFF、扫描 PDF | 原图或扫描件页码，另附 OCR 识别标记 |
 
-管理员在“管理后台”的“导入管理”上传文件后即可提问。同名文件重复导入会去重，内容更新时新版本参与查询，原版本保留以便核验历史答案。表格以首个非空行为表头。单文件上限 20 MiB、提取文本 400 万字符、2 万个片段，每个请求最多上传 8 个文件，请求总量上限 48 MiB。单个 PDF/PPTX 最多 1200 页/张。Office 压缩包解开后的总量上限是 64 MiB。音频和旧版二进制 Office 文件须先转换。
+管理员可在“导入管理 → 来源与解析设置”指定资料来源、预览分块、校正表头行或选择无表头模式。相同来源下的同名资料按原件摘要和解析规则管理版本。使用“重新解析”即可用保存的原件重建索引，历史引用仍可打开旧版本。单文件上限 20 MiB、提取文本 400 万字符、2 万个片段，每个请求最多上传 8 个文件，请求总量上限 48 MiB。单个 PDF/PPTX 最多 1200 页/张。Office 压缩包解开后的总量上限是 64 MiB。各格式的处理顺序、边界和验收见[标准化文档导入流程](docs/import-formats.md)。
 
 ### 离线识别扫描件和图片
 
@@ -96,7 +96,7 @@ $env:RAG_OCR_ENABLED = "1"
 }
 ```
 
-支持字符串、整数、有限数值和 `YYYY-MM-DD` 日期。服务校验允许的主机、端口及解析地址，拒绝重定向。一次查询最多等待 8 秒，响应上限 1 MiB、500 条记录。需要跨项目汇总、计算同比或完成关联时，应由业务接口按确认的口径计算并返回结果。可下载的原始响应包含记录路径之外的字段，接口应从上游只返回允许该工作区全员读取的数据。
+支持字符串、整数、有限十进制数和 `YYYY-MM-DD` 日期。服务校验允许的主机、端口及解析地址，拒绝重定向。一次查询最多等待 8 秒，响应上限 1 MiB、500 条记录。管理员可以声明业务成功条件、分页和指标口径。合计要求数据完整且指标可加。可下载的原始响应包含记录路径之外的字段，接口应从上游只返回允许该工作区全员读取的数据。[业务接口响应与指标口径](docs/业务接口响应与指标口径.md)
 
 ## 配置对话模型与向量模型
 
@@ -125,7 +125,7 @@ $env:RAG_OCR_ENABLED = "1"
 | 上传 / 下载原件 | `POST /api/documents`，multipart 表单中以 `files` 重复提交文件，按 `imported` 和 `errors` 检查每份结果。`GET /api/documents/{id}/download` 下载原件 |
 | 在线阅读 | `GET /api/documents/{id}/preview`，用 `q` 搜索正文或位置，`limit`、`offset` 分页，`chunk_id` 直达引用所在页。支持原版预览的文件另提供 `GET /api/documents/{id}/original` |
 | 管理 / 测试接口 | `POST /api/connectors`、`PUT /api/connectors/{id}`、`POST /api/connectors/{id}/test`，测试正文示例 `{"params":{"year":2026}}` |
-| 模型配置（管理员） | `GET /api/admin/models` 查看生效配置；`PUT /api/admin/models/{kind}` 保存；`POST /api/admin/models/{kind}/test` 测试已保存配置或提交的草稿。`kind` 取 `llm` 或 `embedding` |
+| 模型配置（管理员） | `GET /api/admin/models` 查看生效配置；`PUT /api/admin/models/{kind}` 保存；`POST /api/admin/models/{kind}/test` 测试已保存配置或提交的草稿。`kind` 取 `llm` 或 `embedding`。向量模型支持 `?concurrent_batches=true`，同时提交两批固定诊断文本，核对返回条数和向量维数 |
 | 查询诊断、检索评测（管理员） | `GET /api/admin/query-traces` 按批次读取执行；`POST /api/admin/retrieval/evaluate` 提交 `question`、`document_id`、可选 `chunk_id` 和 `top_k`，返回候选、重排名次和实际分块 |
 | 导入分块对照（管理员） | `GET /api/documents/{doc_id}/source-window?chunk_id=…` 读取所选版本的文本行或工作表单元格，PDF 与图片复用已鉴权的原版预览 |
 | 历史与概览 | `GET /api/history?scope=mine` 可用 `q` 搜索问题，`GET /api/history/{id}` 回放快照。管理员使用 `scope=workspace` 查看工作区查询，在 `GET /api/overview` 查看统计 |

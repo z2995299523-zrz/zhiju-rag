@@ -25,12 +25,14 @@ function modelForm(kind, initial, ctx) {
       <label class="model-remove"><input name="clear_api_key" type="checkbox">移除已配置的密钥</label>
     </div>
     <div class="model-actions"><button type="button" class="secondary-btn" data-test>测试连接</button>
+      ${kind === "embedding" ? '<button type="button" class="secondary-btn" data-batches>测试并发分批</button>' : ""}
       <button type="submit" class="primary-btn" data-save>保存配置</button></div>
     <p class="model-feedback" role="status" aria-live="polite"></p>
   </fieldset>`;
   const {mode, base_url:address, model, api_key:key, clear_api_key:clear} = form.elements;
   const fields = form.querySelector("[data-workspace-fields]");
   const test = form.querySelector("[data-test]");
+  const batches = form.querySelector("[data-batches]");
   const save = form.querySelector("[data-save]");
   const feedback = form.querySelector(".model-feedback");
   let current = initial;
@@ -71,6 +73,7 @@ function modelForm(kind, initial, ctx) {
         "服务地址已更改。如新服务需要鉴权，请填写对应的密钥。" : "填写兼容 OpenAI API 的服务地址和模型名称。";
     }
     test.disabled = mode.value === "disabled";
+    if (batches) batches.disabled = test.disabled;
     save.disabled = mode.value === current.mode && (!manual ||
       (address.value.trim() === (current.base_url || "") && model.value.trim() === (current.model || "") && !key.value && !clear.checked));
   }
@@ -78,7 +81,7 @@ function modelForm(kind, initial, ctx) {
   form.addEventListener("input", () => { feedback.textContent = ""; update(); });
   form.addEventListener("change", () => { feedback.textContent = ""; update(); });
 
-  async function submit(testOnly) {
+  async function submit(testOnly, checkBatches = false) {
     if (!form.reportValidity()) return;
     const payload = {mode:mode.value};
     if (mode.value === "workspace") {
@@ -92,7 +95,8 @@ function modelForm(kind, initial, ctx) {
     feedback.textContent = testOnly ? "正在测试连接…" : "正在保存…";
     feedback.classList.remove("error");
     try {
-      const data = await ctx.api("/api/admin/models/" + kind + (testOnly ? "/test" : ""), {
+      const url = "/api/admin/models/" + kind + (testOnly ? "/test" : "");
+      const data = await ctx.api(url + (checkBatches ? "?concurrent_batches=true" : ""), {
         method:testOnly ? "POST" : "PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)
       });
       if (!form.isConnected) return;
@@ -116,6 +120,7 @@ function modelForm(kind, initial, ctx) {
 
   form.onsubmit = event => { event.preventDefault(); void submit(false); };
   test.onclick = () => submit(true);
+  if (batches) batches.onclick = () => submit(true, true);
   fill();
   return form;
 }

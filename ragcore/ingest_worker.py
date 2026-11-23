@@ -51,15 +51,21 @@ def _worker_limits(suffix):
     signal.alarm(WALL_TIMEOUT_SECONDS)
 
 
-def _worker_main(suffix, locator=None):
+def _worker_main(suffix, mode=None, argument=None):
     from .documents import parse_document
 
     try:
         _worker_limits(suffix)
         data = sys.stdin.buffer.read(MAX_FILE_BYTES + 1)
-        if suffix == ".xlsx" and locator is not None:
+        if mode == "sheet":
             from .source_window import sheet_window
-            entries = sheet_window(data, locator)
+            entries = sheet_window(data, **json.loads(argument))
+        elif mode == "json-window":
+            from .source_window import json_window
+            entries = json_window(data, **json.loads(argument))
+        elif mode == "report":
+            from .documents import parse_document_report
+            entries = parse_document_report("upload" + suffix, data, json.loads(argument))
         else:
             entries = parse_document("upload" + suffix, data)
         encoded = json.dumps(entries, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -128,9 +134,21 @@ def parse_upload(filename: str, content: bytes) -> list[dict]:
     return _bounded_worker(suffix, content)
 
 
-def inspect_sheet(content, locator):
-    return _bounded_worker(".xlsx", content, locator)
+def parse_upload_report(filename, content, options):
+    suffix = Path(filename).suffix.lower()
+    if suffix not in SUPPORTED_EXTENSIONS:
+        raise ValueError(f"不支持此文件扩展名：{suffix or '无'}")
+    return _bounded_worker(suffix, content, "report", json.dumps(options))
+
+
+def inspect_sheet(content, locator, *, start_column=None, header_rows=()):
+    return _bounded_worker(".xlsx", content, "sheet", json.dumps({
+        "locator": locator, "start_column": start_column, "header_rows": header_rows}))
+
+
+def inspect_json(content, suffix, pointer, record_line):
+    return _bounded_worker(suffix, content, "json-window", json.dumps({"pointer": pointer, "record_line": record_line}))
 
 
 if __name__ == "__main__":
-    sys.exit(_worker_main(*sys.argv[1:]) if len(sys.argv) in (2, 3) else 1)
+    sys.exit(_worker_main(*sys.argv[1:]) if len(sys.argv) in (2, 4) else 1)

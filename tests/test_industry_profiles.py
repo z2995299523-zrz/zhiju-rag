@@ -53,6 +53,17 @@ class IndustryProfileTests(unittest.TestCase):
         path.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
         os.environ["RAG_INDUSTRY_PROFILE"] = str(path)
 
+    def test_same_search_term_uses_only_its_own_industry_vocabulary(self):
+        from ragcore.retrieval import rank_document_chunks
+        for label, target in [("制造", "设备交接记录"), ("仓储", "收货交接记录")]:
+            self.write_profile({"name": label, "documents": {
+                "设备.txt":"设备交接记录由车间主任签字。",
+                "收货.txt":"收货交接记录由仓库主管签字。"}, "document_terms":{"流转单":[target]}})
+            store = Store(self.root / label)
+            store.initialize()
+            with patch("ragcore.models.embedding_enabled", return_value=False):
+                self.assertIn(target, rank_document_chunks(store, "流转单由谁签字？").ranked[0]["text"])
+
     def test_default_workspace_is_empty(self):
         self.store.initialize()
         self.assertEqual(questions(self.store), {})
@@ -138,6 +149,14 @@ class IndustryProfileTests(unittest.TestCase):
         self.store.initialize()
         self.assertEqual(questions(self.store)["documents"], DOC_QUESTION)
         self.assertEqual(questions(self.store)["mixed"], MIXED_QUESTION)
+
+    def test_unrelated_upload_does_not_pair_the_new_document_with_a_business_connector(self):
+        self.write_profile(example_profile())
+        self.store.initialize()
+        self.store.ingest("天气公报.txt", "沿岸地区多云。".encode(), "test")
+        result = questions(self.store)
+        self.assertEqual(result["documents"], DOC_QUESTION)
+        self.assertEqual(result["mixed"], MIXED_QUESTION)
 
     def test_example_can_reference_the_first_of_multiple_template_connectors(self):
         profile = example_profile()

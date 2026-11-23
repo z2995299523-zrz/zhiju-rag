@@ -149,7 +149,7 @@ async def guard(request, call_next):
             length = request.headers.get("content-length", "")
             if not length.isascii() or not length.isdigit() or len(length) > 12:
                 return JSONResponse({"detail": "请求需要有效的 Content-Length"}, status_code=411)
-            maximum = 48 * 1024 * 1024 if request.url.path == "/api/documents" else 64 * 1024
+            maximum = 48 * 1024 * 1024 if request.url.path in {"/api/documents", "/api/documents/inspect"} else 64 * 1024
             if int(length) > maximum:
                 return JSONResponse({"detail": "请求超过大小限制"}, status_code=413)
     response = await call_next(request)

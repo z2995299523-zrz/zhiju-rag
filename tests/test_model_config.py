@@ -101,6 +101,15 @@ class ModelConfigTests(unittest.TestCase):
             self.assertEqual(denied.status_code, 422)
         self.assertEqual(len(self.requests), 1)
 
+    def test_embedding_concurrent_probe_validates_two_batches(self):
+        self.save("embedding")
+        response = self.admin.post(self.endpoint + "/embedding/test?concurrent_batches=true")
+        response.raise_for_status()
+        report = response.json()
+        self.assertEqual((report["batches"], report["batch_size"], report["dimension"]), (2, 8, 2))
+        self.assertEqual([len(payload["input"]) for _, _, payload in self.requests], [8, 8])
+        self.assertEqual(self.admin.post(self.endpoint + "/llm/test?concurrent_batches=true").status_code, 422)
+
     def test_real_calls_use_saved_profiles_and_survive_restart(self):
         for kind in ("llm", "embedding"):
             state = self.save(kind, api_key=kind + "-fixture-key")

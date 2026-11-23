@@ -89,6 +89,21 @@ def _factor(term: str) -> float:
     return 1.0
 
 
+def structural_text(chunk):
+    """Rank by original structural labels without treating page or row numbers as facts."""
+    parts = [str(chunk.get("source_key") or ""), str(chunk.get("context") or "")]
+    locator = str(chunk.get("locator") or "")
+    if "JSON Pointer /" in locator:
+        pointer = locator.partition("JSON Pointer ")[2].split(" · ")[0]
+        keys = [p.replace("~1", "/").replace("~0", "~") for p in pointer.split("/") if p and not p.isdigit()]
+        parts.extend(keys)
+        if any(re.search(r"date|dtstart|dtend|日期", k, re.I) for k in keys):
+            raw_date = re.fullmatch(r'\s*"?(\d{4})(\d{2})(\d{2})"?\s*', str(chunk.get("text", "")))
+            if raw_date:
+                parts.append(f"日期 {raw_date[1]} 年 {raw_date[2]} 月 {raw_date[3]} 日")
+    return " ".join(parts).strip()
+
+
 _LIMIT = re.compile(r"上限|限额|下限|封顶|最高|最低|最多|至少|不超过|\b(?:maximum|minimum|limit|cap)\b")
 _ASK_NUMBER = re.compile(r"多少|多少钱|几(?:元|万|人|个|天|件|笔)|具体数值|多高|"
                          r"\b(?:how much|how many)\b")
@@ -128,7 +143,9 @@ def filter_evidence(question: str, chunks: list[dict]) -> list[dict]:
     asks_phone = not contact_procedure and bool(_PHONE.search(q))
     asks_email = not contact_procedure and bool(_EMAIL.search(q))
     asks_founder = bool(_FOUNDER.search(q))
-    needs_fact = any((asks_limit, asks_measure, asks_phone, asks_email, asks_founder))
+    asks_visits = asks_number and "人次" in q
+    asks_shortcut = bool(re.search(r"快捷键(?:是(?:什么|哪)|为|有哪)|(?:which|what) (?:keyboard )?shortcut", q))
+    needs_fact = any((asks_limit, asks_measure, asks_phone, asks_email, asks_founder, asks_visits, asks_shortcut))
     years = set(_years_from_text(q)) if asks_measure else set()
     projects = _projects_from_text(q, demo=True) if asks_measure else []
     compatible = []
@@ -145,8 +162,13 @@ def filter_evidence(question: str, chunks: list[dict]) -> list[dict]:
             compatible.append(chunk)
             continue
         body = _normal(text)
-        location = _normal(str(chunk.get("filename", "")) + " " + str(chunk.get("locator", "")))
+        location = _normal(str(chunk.get("filename", "")) + " " + structural_text(chunk))
         evidence = body + " " + location
+        if asks_shortcut and not re.search(r"\b(?:ctrl|control|alt|shift|cmd|command|windows)\s*[+‐-]\s*\w|"
+                                          r"\b(?:f(?:[1-9]|1[0-2])|enter|escape|tab|delete)\b|回车键|空格键", body):
+            continue
+        if asks_visits and not re.search(r"人次|客流|passenger(?:s| (?:trips|journeys))|ridership|visits", evidence, re.I):
+            continue
         if asks_limit and not _UNLIMITED.search(body):
             bound = _LIMIT.search(evidence) or re.search(
                 r"每人|每日|每天|每晚|每次|标准|定额|以内|不得高于|不得低于|\bper (?:day|night|person)\b", evidence
@@ -175,12 +197,19 @@ def rank_chunks(question: str, chunks: list[dict], limit: int = 5) -> list[dict]
     if not query or not chunks or limit <= 0:
         return []
     candidates = []
+    # Foreign names and labels embedded in a question often identify a precise object
+    # while the remainder of the question is in another language.
+    phrases = []
+    if re.search(r"[\u3400-\u9fff]", question):
+        phrases = [m[0].lower() for m in re.finditer(
+            r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9'-]*(?:[ \t]+[A-Za-z0-9][A-Za-z0-9'-]*)+", question)]
     frequencies: Counter[str] = Counter()
     title_cache: dict[str, Counter[str]] = {}
     for chunk in filter_evidence(question, chunks):
         text = str(chunk.get("text", ""))
         filename = str(chunk.get("filename", ""))
-        body = _tokens(text)
+        contextual = structural_text(chunk)
+        body = _tokens(" ".join((text, contextual)))
         if not body:
             continue
         if filename not in title_cache:
@@ -188,12 +217,13 @@ def rank_chunks(question: str, chunks: list[dict], limit: int = 5) -> list[dict]
         title = title_cache[filename]
         matched = query.keys() & (body.keys() | title.keys())
         frequencies.update(matched)
-        candidates.append((chunk, body, title, matched, sum(body.values())))
+        anchors = sum(1 + bool(re.search(r"\d", p)) for p in phrases if p in _normal(text + " " + contextual))
+        candidates.append((chunk, body, title, matched, sum(body.values()), anchors))
     if not candidates:
         return []
 
     count = len(candidates)
-    mean_length = sum(entry[-1] for entry in candidates) / count
+    mean_length = sum(entry[4] for entry in candidates) / count
     # Retain a floor on IDF so that a useful word occurring in all pages of a
     # single imported document can still contribute to coverage.
     weights = {
@@ -203,21 +233,21 @@ def rank_chunks(question: str, chunks: list[dict], limit: int = 5) -> list[dict]
     }
     total = sum(_factor(term) for term in query)
     ranked = []
-    for chunk, body, title, matched, length in candidates:
+    for chunk, body, title, matched, length, anchors in candidates:
         substantive = [term for term in matched if _factor(term) >= 0.35]
         if not substantive or not any(term in body for term in substantive):
             continue
         coverage = sum(_factor(term) for term in matched) / total
         # One accidental shared Chinese bigram in a long question is weak
         # evidence. Require more overlap for generic or long queries.
-        if coverage < 0.16 or (len(substantive) == 1 and coverage < 0.31):
+        if not anchors and (coverage < 0.16 or (len(substantive) == 1 and coverage < 0.31)):
             continue
         norm = 1.2 * (0.30 + 0.70 * length / mean_length)
         score = 0.0
         for term in matched:
             tf = body[term] + 0.65 * min(title[term], 2)
             score += weights[term] * 2.2 * tf / (tf + norm)
-        score *= 0.45 + 0.55 * coverage
+        score = score * (0.45 + 0.55 * coverage) + 3 * anchors
         ranked.append({**chunk, "score": round(score, 5)})
     ranked.sort(key=lambda entry: entry["score"], reverse=True)
     return ranked[:limit]
@@ -249,12 +279,48 @@ def rank_document_chunks(store, question: str) -> DocumentRanking:
     """The query, admin diagnostic and offline evaluation share this ranking pass."""
     from . import models
 
-    candidates, method = store.candidates(question, with_method=True)
-    lexical = rank_chunks(question, candidates, limit=8)
+    q = _normal(question)
+    # Bridge the standard calendar field names that rarely occur literally in a Chinese question.
+    aliases = []
+    if "时区" in q:
+        aliases.extend(("timezone", "tzid"))
+    if "历法" in q:
+        aliases.extend(("calscale", "calendar scale"))
+    if "超链接" in q:
+        aliases.append("hyperlink")
+    if "快捷键" in q:
+        aliases.append("shortcut")
+    if "插入" in q and aliases:
+        aliases.append("insert")
+    if "窗口" in q and aliases:
+        aliases.append("window")
+    for term, words in store.document_terms().items():
+        needle = re.escape(_normal(term.strip()))
+        if term.isascii():
+            needle = rf"(?<![a-z0-9_]){needle}(?![a-z0-9_])"
+        if re.search(needle, q):
+            aliases.extend(_normal(word.strip()) for word in words)
+    search_query = " ".join([question, *aliases]) if aliases else question
+    candidates, method = store.candidates(search_query, with_method=True)
+    scoped = {c["source_key"] for c in candidates if c.get("source_key")
+              and len(str(c["source_key"]).strip()) > 1 and _normal(c["source_key"]) in q}
+    if scoped and not re.search(r"除了|排除|不含|except|excluding", question, re.I):
+        candidates = [c for c in candidates if c.get("source_key") in scoped]
+    lexical = rank_chunks(search_query, candidates, limit=8)
+    if aliases:
+        # A literal filename in the question can outrank the translated field/procedure
+        # even on a contents page. Rank its actual English fields separately.
+        alternative = rank_chunks(" ".join(aliases), filter_evidence(question, candidates), limit=3)
+        lexical = list({item["id"]:item for item in [*alternative, *lexical]}.values())[:8]
     semantic = None
     ranking_method = "lexical"
     if candidates and models.embedding_enabled():
-        semantic = models.semantic_rank(question, filter_evidence(question, candidates), limit=8)
+        # Embed a bounded shortlist on large collections so one cold question does not
+        # exhaust the upstream deadline by re-encoding 180 passages. Keep exact lexical hits.
+        pool = candidates
+        if method == "fts5":
+            pool = list({c["id"]: c for c in [*lexical, *candidates[:32]]}.values())
+        semantic = models.semantic_rank(question, filter_evidence(question, pool), limit=8)
         ranking_method = "hybrid" if semantic else "lexical_fallback"
     if semantic:
         # Fuse positions because lexical scores and cosines use different scales.
@@ -266,12 +332,68 @@ def rank_document_chunks(store, question: str) -> DocumentRanking:
                 items[key] = item
         ranked = [items[key] for key in sorted(scores, key=scores.get, reverse=True)]
     else:
-        ranked = [item for item in lexical if item["score"] >= lexical[0]["score"] * 0.78]
+        # Keeping the best three avoids letting one unusually short heading eliminate
+        # its data row. The lexical stage already applies a minimum coverage gate.
+        ranked = [item for index, item in enumerate(lexical)
+                  if index < 3 or item["score"] >= lexical[0]["score"] * 0.78]
+    ranked = _prefer_requested_records(q, ranked)
+    if aliases:
+        ranked.sort(key=lambda item: -sum(alias in _normal(item["text"]) for alias in aliases))
     result = DocumentRanking(candidates, ranked, method, ranking_method)
+    from .query_trace import stage_metrics
+    stage_metrics(candidate_count=len(candidates), ranking_method=ranking_method,
+                  lexical_ids=[c["id"] for c in lexical], ranked_ids=[c["id"] for c in ranked[:8]])
     observed = _observed_rankings.get()
     if observed is not None:
         observed.append(result)
     return result
+
+
+def _prefer_requested_records(question, ranked):
+    # Nearby rows or sibling sections often share every measure. When the question names
+    # a cell or leaf heading, exclude its unmatched siblings within the same document.
+    def group(item):
+        return item.get("document_id", item.get("filename")), (item.get("metadata") or {}).get("sheet")
+
+    def table_row(item):
+        meta = item.get("metadata") or {}
+        if "header_rows" in meta and "row" in meta:
+            location = "" if meta.get("sheet") else str(item.get("locator") or "").partition(" · 第 ")[0]
+            return group(item), location, meta["row"]
+
+    def requested(item):
+        meta = item.get("metadata") or {}
+        if meta.get("record_identifiers"):
+            for identifier in meta["record_identifiers"]:
+                value = _normal(identifier.get("value")).strip()
+                if not value or len(value) > 180:
+                    continue
+                if value.isdigit() and not (str(identifier.get("key") or "").casefold() in question
+                                              or re.search(r"编号|编码|代码|\bid\b|\bcode\b", question)):
+                    continue
+                if re.search(r"(?<![a-z0-9_-])" + re.escape(value) + r"(?![a-z0-9_-])", question):
+                    return True
+        if "header_rows" in meta:
+            fields = item["text"].split(" ｜ ")
+            if " ｜ " in (item.get("context") or ""):
+                fields.extend(item["context"].split(" ｜ "))
+            for field in fields:
+                value = _normal(field.partition("：")[2]).strip()
+                parts = [s.strip() for s in value.split(",")]
+                if len(value) >= 2 and any(c.isalpha() for c in value) and all(p and p in question for p in parts):
+                    return True
+        elif not meta:
+            leaf = _normal(item.get("context")).split(" / ")[-1].strip()
+            return len(leaf) >= 2 and leaf in question
+        return False
+
+    matches = [requested(item) for item in ranked]
+    scoped = {group(item) for item, match in zip(ranked, matches) if match}
+    # An entity cell can be in an earlier column group than the requested measure.
+    # Keep the original ranking among all groups belonging to the same physical row.
+    rows = {row for item, match in zip(ranked, matches) if match and (row := table_row(item)) is not None}
+    return [item for item, match in zip(ranked, matches) if match or group(item) not in scoped
+            or table_row(item) in rows]
 
 
 def validate_evidence_labels(labels):
@@ -374,9 +496,10 @@ def grounded_excerpts(question: str, ranked: list[dict], limit: int = 3,
                     break
                 start += len(line)
             excerpt = excerpt[start:].strip()
-        if excerpt and excerpt not in seen:
+        identity = (chunk.get("document_id", chunk.get("filename")), chunk.get("locator"), excerpt)
+        if excerpt and identity not in seen:
             excerpts.append({**chunk, "excerpt": excerpt})
-            seen.add(excerpt)
+            seen.add(identity)
         if len(excerpts) >= limit:
             break
     return excerpts
@@ -449,7 +572,7 @@ def _named_values(question: str, names: list[str], kind: str) -> list[str]:
     if kind == "integer":
         value = r"([+-]?\d+)(?![.\d])"
     elif kind == "number":
-        value = r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))(?![.\d])"
+        value = r"([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)(?![.\deE])"
     elif kind == "date":
         value = r"(\d{4}-\d{2}-\d{2})(?!\d)"
     else:
@@ -491,6 +614,17 @@ def _years_from_text(question: str) -> list[str]:
     return values
 
 
+def _scope_phrase(question):
+    # A possessive qualifier may be a department, region or another dimension. The
+    # caller can ask for a value instead of dropping the qualifier and reading all rows.
+    before, sep, after = question.partition("的")
+    if not sep or not after:
+        return ""
+    phrase = re.split(r"查询|请问|查一下|查看|统计|列出|对比|比较|换成|那么|帮我查|^那|[，,。；;]", before)[-1]
+    phrase = re.sub(r"(?:19|20)\d{2}\s*年(?:度)?|今年|去年|本年|上年", "", phrase).strip()
+    return "" if re.search(r"全部|所有|每个|各个|全体|不限", phrase) else phrase
+
+
 def _parameters(question: str, config: dict) -> tuple[dict, list[str], dict[str, str]]:
     params = {}
     missing = []
@@ -504,6 +638,20 @@ def _parameters(question: str, config: dict) -> tuple[dict, list[str], dict[str,
             aliases = [aliases]
         names = [key, label, *aliases]
         values = _named_values(question, names, kind)
+        if kind == "string":
+            choices = spec.get("choices", [])
+            choice_hits = [c for c in choices if c in question]
+            values.extend(c for c in choice_hits if not any(c != other and c in other for other in choice_hits))
+            is_department = key.casefold() in {"department", "dept", "department_name"} or label in {"部门", "科室", "部门名称"}
+            prefix = _scope_phrase(question)
+            if is_department and re.fullmatch(r"[\w\u3400-\u9fff、 ]{1,64}(?:部|科|处|组|室|部门)", prefix):
+                values.extend(v.strip() for v in re.split(r"和|与|或|、", prefix))
+                if any(re.search(r"某|这个|那个|我们|本部门|那个组", v) for v in values):
+                    ambiguous[key] = label
+                    continue
+            if choices and any(value not in choices for value in values):
+                ambiguous[key] = label
+                continue
         is_year = key.lower() in {"year", "fiscal_year", "budget_year"} or label in {"年", "年度", "年份", "预算年度"}
         if is_year:
             values.extend(_years_from_text(question))
@@ -523,8 +671,7 @@ def _parameters(question: str, config: dict) -> tuple[dict, list[str], dict[str,
                 if kind == "integer":
                     value = int(value)
                 elif kind == "number":
-                    value = float(value)
-                    if not math.isfinite(value):
+                    if len(value) > 100:
                         raise ValueError
                 elif kind == "date":
                     value = date.fromisoformat(value).isoformat()
@@ -533,6 +680,16 @@ def _parameters(question: str, config: dict) -> tuple[dict, list[str], dict[str,
                 missing.append(label)
         elif spec.get("required"):
             missing.append(label)
+    qualifier = _scope_phrase(question)
+    string_fields = [s for s in config.get("parameters", []) if s.get("type", "string") == "string"]
+    if (qualifier and string_fields and not any(s.get("required") for s in string_fields)
+            and not any(s["name"] in params or s["name"] in ambiguous for s in string_fields)
+            and not any(str(v) in qualifier for v in params.values())
+            and not re.search(r"制度|规定|口径|公式|方法|指标|参数|所有|全部|预算执行率", qualifier)
+            and ":" not in qualifier and "=" not in qualifier):
+        for spec in string_fields:
+            label = spec.get("label") or spec["name"]
+            ambiguous[spec["name"]] = label
     return params, missing, ambiguous
 
 

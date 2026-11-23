@@ -50,6 +50,53 @@ def _string_list(value, label, limit):
     return list(dict.fromkeys(_string(v, label, 80, required=True) for v in value))
 
 
+def _field_path(value, label):
+    path = _string(value, label, 160, required=True)
+    if not all(re.fullmatch(r"[\w-]{1,64}", key) for key in path.split(".")):
+        raise ConnectorError(f"{label}须为用点分隔的 JSON 字段名")
+    return path
+
+
+def _response_contract(raw):
+    keys = {"success_path", "success_value", "total_path", "has_more_path", "complete"}
+    if not isinstance(raw, dict) or raw.keys() - keys:
+        raise ConnectorError("响应规则字段无效")
+    contract = {key: _field_path(value, key) for key, value in raw.items() if key.endswith("_path")}
+    if ("success_path" in raw) != ("success_value" in raw):
+        raise ConnectorError("请同时配置业务状态路径和成功值")
+    if "success_value" in raw:
+        if type(raw["success_value"]) not in (str, bool, int):
+            raise ConnectorError("成功值须为字符串、整数或布尔值")
+        contract["success_value"] = raw["success_value"]
+    if "complete" in raw:
+        if type(raw["complete"]) is not bool:
+            raise ConnectorError("完整结果标记须为布尔值")
+        contract["complete"] = raw["complete"]
+    return contract
+
+
+def _metrics(items):
+    if not isinstance(items, list) or len(items) > 32:
+        raise ConnectorError("指标须为最多 32 项的数组")
+    metrics = []
+    fields = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ConnectorError("指标须为对象")
+        field = _string(item.get("field"), "指标字段", 100, required=True)
+        if field in fields or _SECRET_NAME.search(field):
+            raise ConnectorError("指标字段重复或含有凭据字段名")
+        fields.add(field)
+        additive = item.get("additive", False)
+        if type(additive) is not bool:
+            raise ConnectorError("指标可加标记须为布尔值")
+        metrics.append({"field": field, "label": _string(item.get("label", field), "指标名称", 100, required=True),
+                        "definition": _string(item.get("definition", ""), "指标口径", 500),
+                        "unit": _string(item.get("unit", ""), "单位", 24),
+                        "aliases": _string_list(item.get("aliases", []), "指标别名", 24), "additive": additive})
+    return metrics
+
+
 def _allowed_target(parts):
     host = parts.hostname
     try:
@@ -133,11 +180,20 @@ def validate_config(config: dict) -> dict:
             "required": required,
             "aliases": _string_list(raw.get("aliases", []), "参数别名", 24),
         })
-    return {
+        if raw.get("choices"):
+            if kind != "string":
+                raise ConnectorError("预设筛选值仅支持文本参数")
+            parameters[-1]["choices"] = _string_list(raw["choices"], "预设筛选值", 200)
+    normalized = {
         "name": name, "description": description, "url": url,
         "keywords": _string_list(config.get("keywords", []), "意图关键词", 64),
         "parameters": parameters, "records_path": records_path, "token_env": token_env,
     }
+    if "response_contract" in config:
+        normalized["response_contract"] = _response_contract(config["response_contract"])
+    if "metrics" in config:
+        normalized["metrics"] = _metrics(config["metrics"])
+    return normalized
 
 
 def _parameters(definitions, values):
@@ -169,6 +225,8 @@ def _parameters(definitions, values):
                 value = dt.date.fromisoformat(value).isoformat()
             else:
                 value = _string(value, label, 256, required=True)
+                if p.get("choices") and value not in p["choices"]:
+                    raise ConnectorError(f"参数「{label}」不在配置的筛选值范围内")
         except (ValueError, OverflowError):
             raise ConnectorError(f"参数「{label}」不符合 {kind} 格式") from None
         result[key] = value
@@ -391,6 +449,54 @@ def _records(payload, path):
     return value
 
 
+def snapshot_rows(body, path):
+    """Use the original response parser and frozen record path during replay checks."""
+    return _records(_load_json(body), path)
+
+
+def _at_path(payload, path):
+    for key in path.split("."):
+        if not isinstance(payload, dict) or key not in payload:
+            raise ConnectorError(f"响应缺少已配置的元数据字段「{path}」")
+        payload = payload[key]
+    return payload
+
+
+def _check_success(payload, contract, envelope):
+    if "success_path" in contract:
+        actual = _at_path(payload, contract["success_path"])
+        expected = contract["success_value"]
+        if type(actual) is not type(expected) or actual != expected:
+            raise ConnectorError("上游业务状态未满足配置的成功条件")
+    elif envelope and isinstance(payload, dict):
+        if payload.get("success") is False or payload.get("ok") is False:
+            raise ConnectorError("上游业务系统报告查询失败")
+        if "code" in payload and ("message" in payload or "msg" in payload):
+            if str(payload["code"]).upper() not in {"200", "0", "000000", "OK", "SUCCESS"}:
+                raise ConnectorError("上游业务状态未确认成功，请核对接口的成功判据")
+
+
+def _coverage(payload, contract, envelope, count, demo):
+    total_path = contract.get("total_path")
+    more_path = contract.get("has_more_path")
+    if envelope and isinstance(payload, dict):
+        if not total_path and "total" in payload:
+            total_path = "total"
+        if not more_path and "has_more" in payload:
+            more_path = "has_more"
+    total = _at_path(payload, total_path) if total_path else None
+    more = _at_path(payload, more_path) if more_path else None
+    if total_path and (type(total) is not int or total < count):
+        raise ConnectorError("上游总条数无效或少于本页行数")
+    if more_path and type(more) is not bool:
+        raise ConnectorError("上游下一页标记须为布尔值")
+    if more is True and total == count:
+        raise ConnectorError("上游总条数与分页标记冲突")
+    full = (total == count if total is not None else (demo or contract.get("complete") is True)) and more is not True
+    return {"returned_count": count, "total_count": count if full else total,
+            "complete": full, "has_more": more}
+
+
 def execute(config: dict, params: dict, *, demo_handler=None, include_raw=False, read=None) -> dict:
     """Fetch matching rows and the sanitized GET request used to produce them."""
     settings = validate_config(config)
@@ -406,9 +512,12 @@ def execute(config: dict, params: dict, *, demo_handler=None, include_raw=False,
         target = (path or "/") + ("?" + query if query else "")
         body = _get_body(parts, target, settings["token_env"], read)
     payload = _load_json(body)
+    contract = settings.get("response_contract", {})
+    _check_success(payload, contract, bool(settings["records_path"]))
     rows = _records(payload, settings["records_path"])
     result = {
-        "rows": rows, "total_count": len(rows), "response_sha256": hashlib.sha256(body).hexdigest(),
+        "rows": rows, **_coverage(payload, contract, bool(settings["records_path"]), len(rows), parts.scheme == "demo"),
+        "response_sha256": hashlib.sha256(body).hexdigest(),
         "fetched_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "request": "GET " + request,
     }

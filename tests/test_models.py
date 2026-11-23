@@ -34,6 +34,16 @@ class StreamingModelTests(unittest.IsolatedAsyncioTestCase):
         return httpx.AsyncClient(transport=httpx.MockTransport(respond))
 
     @patch.dict(os.environ, CHAT, clear=True)
+    async def test_grounding_rejection_needs_a_completed_stream_before_record_lookup(self):
+        bad = block("申请报销须提交合同。","S1","不存在的原文")
+        for tail,complete,eligible in [(bad,True,True),(bad,False,False),('{"text":',True,False)]:
+            with self.subTest(tail=tail,complete=complete), patch.object(
+                    models.httpx,"AsyncClient",return_value=self.provider([tail],done=complete)):
+                with self.assertRaises(models.ModelAnswerError) as error:
+                    await anext(models.stream_answer("材料",[DATA[0]]))
+                self.assertEqual(isinstance(error.exception,models.RejectedAnswer),eligible)
+
+    @patch.dict(os.environ, CHAT, clear=True)
     async def test_rephrased_paragraph_published_before_provider_finishes(self):
         first = block("报销时请提交发票。", "S1", "报销须提供发票")
         second = block("- 采购支出还需附上合同。", "S2", "采购支出需要附合同")
@@ -87,6 +97,17 @@ def reply(selection):
 
 
 class ModelTests(unittest.TestCase):
+    @patch.dict(os.environ, CHAT, clear=True)
+    @patch.object(models, "_post")
+    def test_only_a_completed_well_formed_claim_can_use_record_lookup(self, post):
+        bad = block("申请报销须提交合同。","S1","不存在的原文")
+        for reason,content,eligible in [("stop",bad,True),("length",bad,False),(None,bad,False),
+                                        ("stop",[],False),("stop","{}",False)]:
+            post.return_value = {"choices":[{"finish_reason":reason,"message":{"content":content}}]}
+            with self.subTest(reason=reason,content=content), self.assertRaises(models.ModelAnswerError) as error:
+                models.synthesize("材料",[DATA[0]])
+            self.assertEqual(isinstance(error.exception,models.RejectedAnswer),eligible)
+
     @patch.dict(os.environ, {}, clear=True)
     @patch.object(models, "_post")
     def test_offline_mode_never_calls_network(self, post):

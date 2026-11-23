@@ -18,6 +18,7 @@ DEFAULT_CASES = Path(__file__).resolve().parent.parent / "eval" / "seed_cases.js
 
 
 def evidence_errors(store, result):
+    from .connectors import ConnectorError, snapshot_rows
     errors = []
     if result["status"] == "answered" and not result["citations"]:
         errors.append("answered without evidence")
@@ -39,8 +40,16 @@ def evidence_errors(store, result):
             elif source["kind"] == "api":
                 row = conn.execute("SELECT body FROM api_snapshots WHERE history_id=? AND source_id=?",
                                    (result["id"], sid)).fetchone()
-                if (row is None or hashlib.sha256(row["body"]).hexdigest() != source["sha256"]
-                        or json.loads(row["body"]) != source["rows"]):
+                path = source.get("records_path")
+                if path is None:
+                    archived = conn.execute("SELECT result FROM history WHERE id=?", (result["id"],)).fetchone()
+                    stored = json.loads(archived["result"]) if archived else {}
+                    path = next((s.get("records_path", "") for s in stored.get("citations", []) if s["id"] == sid), "")
+                try:
+                    same_rows = row is not None and snapshot_rows(row["body"], path) == source["rows"]
+                except ConnectorError:
+                    same_rows = False
+                if not same_rows or hashlib.sha256(row["body"]).hexdigest() != source["sha256"]:
                     errors.append(f"API snapshot mismatch [{sid}]")
             else:
                 errors.append(f"unknown source kind [{sid}]")

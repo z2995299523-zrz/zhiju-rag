@@ -7,10 +7,12 @@ import threading
 from contextlib import aclosing
 from pathlib import Path
 
-from . import model_config, models, retrieval
+from . import followup, model_config, models, retrieval
+from .business_answers import matched_metrics, operation_answer, operation_hint
 from .answer_text import data_paragraphs, document_paragraphs
 from .connectors import ConnectorError, ConnectorRead, execute
-from .query_trace import QueryTrace, active_stage
+from .query_trace import QueryTrace, active_stage, stage_note
+from .record_lookup import direct_record_answer
 from .storage import pack
 
 
@@ -61,7 +63,8 @@ def workspace_answer(result, *, show_sql=False):
         # Names and values were not stored separately in early snapshots. Use only
         # their saved business parameters, never re-fetch a connector or parse its URL.
         visible = {k: source[k] for k in ("id", "kind", "connector_id", "title", "fetched_at", "demo",
-                                          "total_count", "sha256", "rows_sha256", "metric_definition") if k in source}
+                                          "total_count", "returned_count", "complete", "has_more", "sha256",
+                                          "rows_sha256", "metric_definition") if k in source}
         visible["title"] = display_fields(visible.get("title"))
         if show_sql and isinstance(source.get("executed_sql"), str):
             visible["executed_sql"] = source["executed_sql"]
@@ -69,7 +72,8 @@ def workspace_answer(result, *, show_sql=False):
             visible["request"] = "GET demo://budget"
         visible["filters"] = (source["filters"] if isinstance(source.get("filters"), list) else
                               visible_filters(params, [(key, key) for key in (params or {})]))
-        visible["locator"] = f"{source['total_count']} 条记录" if "total_count" in source else ""
+        returned = source.get("returned_count", source.get("total_count"))
+        visible["locator"] = f"本次返回 {returned} 条记录" if returned is not None else ""
         if isinstance(source.get("rows"), list):
             visible["rows"] = display_fields(source["rows"])
             if visible["rows"] != source["rows"]:
@@ -86,12 +90,16 @@ def workspace_answer(result, *, show_sql=False):
 
 
 def document_sources(store, question):
+    from .query_trace import stage_metrics
     ranked = retrieval.rank_document_chunks(store, question).ranked
     sources = []
     for item in retrieval.grounded_excerpts(question, ranked, limit=3, max_chars=520):
         sources.append({"kind": "document", "title": item["filename"], "document_id": item["document_id"],
                         "chunk_id": item["id"], "locator": item["locator"], "text": item["text"],
-                        "excerpt": item["excerpt"], "sha256": item["sha256"]})
+                        "excerpt": item["excerpt"], "source_key": item.get("source_key") or "",
+                        "context": item.get("context", ""),
+                        "metadata": item.get("metadata") or {}, "highlights": [], "sha256": item["sha256"]})
+    stage_metrics(excerpt_ids=[s["chunk_id"] for s in sources])
     return sources
 
 
@@ -106,7 +114,9 @@ def data_source(config, params, read=None):
             "filters": visible_filters(result["applied_params"], [(p["name"], p["label"]) for p in config["parameters"]]),
             "fetched_at": result["fetched_at"],
             "sha256": result["response_sha256"], "rows_sha256": digest, "records_path": config["records_path"],
-            "total_count": len(rows), "demo": config["url"] == "demo://budget", "_raw": result["raw_body"]}
+            "returned_count": len(rows), "total_count": result.get("total_count"),
+            "complete": result.get("complete", False), "has_more": result.get("has_more"),
+            "demo": config["url"] == "demo://budget", "_raw": result["raw_body"]}
     if source["demo"] and rows and "预算执行率" in rows[0]:
         source["metric_definition"] = "预算执行率 = 已执行金额（万元）÷ 预算金额（万元）× 100%，结果按整百分比展示。"
     if result.get("executed_sql"):
@@ -201,14 +211,19 @@ async def _document_parts(question, sources, stream_model):
 async def _generate(store, owner, question, mode, overrides, selected_id, stream_model, show_sql,
                     parent_id, return_archive, request_id, trace):
     yield "status", {"message": "正在判断需要查阅的资料和数据…"}
-    plan, config, has_configs = await asyncio.to_thread(query_plan, store, question, mode, selected_id)
-    params = {**plan["params"], **overrides}
+    subject, selected_id, inherited = await asyncio.to_thread(followup.context, store, owner, parent_id,
+                                                              question, mode, selected_id)
+    plan, config, has_configs = await asyncio.to_thread(query_plan, store, subject, mode, selected_id)
+    params = {**inherited, **plan["params"], **overrides}
     intent = plan["intent"]
     citations, notes, missing = [], [], []
     data_needed = intent in ("data", "mixed")
     docs_needed = intent in ("documents", "mixed")
     needs_input = False
     failed = False
+    data_summary = ""
+    data_complete = True
+    metrics = matched_metrics(config, subject) if config else []
     if data_needed:
         trace.start("parameters")
         yield "status", {"message": "正在核对查询条件…"}
@@ -221,7 +236,7 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
             missing = [s["label"] for s in specs if s["required"] and params.get(s["name"]) in (None, "")]
             for label in plan.get("missing", []):
                 key = next((s["name"] for s in specs if s["label"] == label), None)
-                if key and key not in overrides and label not in missing:
+                if key and params.get(key) in (None, "") and label not in missing:
                     missing.append(label)
             ambiguous = [key for key in plan.get("ambiguous_params", []) if overrides.get(key) in (None, "")]
             if ambiguous:
@@ -235,7 +250,13 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
                 yield "status", {"message": "正在查询业务数据…"}
                 read = ConnectorRead()
                 try:
-                    citations.append(await asyncio.to_thread(data_source, config, params, read))
+                    source = await asyncio.to_thread(data_source, config, params, read)
+                    definitions = [m["definition"] for m in metrics if m.get("definition")]
+                    if definitions:
+                        source["metric_definition"] = "；".join(definitions)
+                    public_source, = workspace_answer({"citations":[source]})["citations"]
+                    data_summary, data_complete = operation_answer(public_source, subject, metrics)
+                    citations.append(source)
                     if not citations[-1]["rows"]:
                         trace.mark("empty")
                 except asyncio.CancelledError:
@@ -250,8 +271,8 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
     if docs_needed:
         trace.start("retrieval")
         yield "status", {"message": "正在检索文档并定位相关原文…"}
-        subject = retrieval.document_question(question) if intent == "mixed" else question
-        docs = await asyncio.to_thread(document_sources, store, subject)
+        doc_subject = retrieval.document_question(subject) if intent == "mixed" else subject
+        docs = await asyncio.to_thread(document_sources, store, doc_subject)
         citations.extend(docs)
         if not docs:
             trace.mark("empty")
@@ -263,14 +284,15 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
         if source["kind"] == "api":
             snapshots.append((source["id"], source["sha256"], source.pop("_raw")))
     document_cites = [s for s in citations if s["kind"] == "document"]
-    useful = bool(document_cites) or any(s.get("rows") for s in citations)
+    has_data = any(s["kind"] == "api" for s in citations)
+    useful = bool(document_cites) or has_data
     if needs_input:
         status = "needs_input"
     elif failed:
         status = "partial" if useful else "error"
     elif not useful:
         status = "no_evidence"
-    elif intent == "mixed" and not (document_cites and any(s.get("rows") for s in citations)):
+    elif not data_complete or (intent == "mixed" and not (document_cites and has_data)):
         status = "partial"
     else:
         status = "answered"
@@ -279,6 +301,10 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
               "reason": plan.get("reason", "")}
     if parent_id is not None:
         result["parent_id"] = parent_id
+    if metrics:
+        result["metric_labels"] = [m["label"] for m in metrics]
+    if config and (operation := operation_hint(subject)):
+        result["operation_hint"] = operation
     original_sources = {s["id"]: s for s in citations}
     visible_sources = {s["id"]: s for s in workspace_answer(result, show_sql=show_sql)["citations"]}
     used_sources = {sid: source for sid, source in visible_sources.items() if source["kind"] == "api"}
@@ -286,21 +312,22 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
     yield "status", {"message": "正在整理回答…"}
     narrative = []
     for visible in used_sources.values():
-        for paragraph in data_paragraphs(visible, question):
+        parts = ([f"{data_summary} [{visible['id']}]"] if data_summary else data_paragraphs(visible, subject))
+        for paragraph in parts:
             yield "delta", {"text": ("\n\n" if narrative else "") + paragraph}
             narrative.append(paragraph)
     generated = []
     if document_cites:
         prefix = "\n\n" if narrative else ""
         try:
-            async with aclosing(_document_parts(question, document_cites, stream_model)) as parts:
+            async with aclosing(_document_parts(subject, document_cites, stream_model)) as parts:
                 async for part in parts:
                     if not part:
                         continue
                     # Model paragraphs end with server-validated IDs. The synchronous path
                     # may deliver several lines in a single response.
                     cited = re.findall(r"\[(S\d+)\](?=(?: \[S\d+\])*(?:\n|$))", part)
-                    if any(sid not in used_sources for sid in cited):
+                    if any(sid not in used_sources or visible_sources.get(sid, {}).get("highlights") for sid in cited):
                         used_sources.update((sid, visible_sources[sid]) for sid in cited if sid in visible_sources)
                         yield "evidence", {"citations": list(used_sources.values())}
                     yield "delta", {"text": prefix + part}
@@ -309,12 +336,27 @@ async def _generate(store, owner, question, mode, overrides, selected_id, stream
         except models.InsufficientEvidence:
             if generated:
                 raise models.ModelAnswerError("回答依据不完整，请重试。") from None
+        except models.RejectedAnswer:
+            if generated or narrative or intent != "documents":
+                raise
+            lookup = await asyncio.to_thread(direct_record_answer, store, subject, document_cites)
+            if lookup is None:
+                raise
+            claim, evidence = lookup
+            for index, source in enumerate(evidence, 1):
+                sid = source["id"] = f"S{index}"
+                original_sources[sid] = used_sources[sid] = source
+            stage_note("verified_record_lookup")
+            answer = claim + " " + " ".join(f"[{s['id']}]" for s in evidence)
+            generated.append(answer)
+            yield "evidence", {"citations":evidence}
+            yield "delta", {"text":answer}
     result["citations"] = [original_sources[sid] for sid in used_sources]
     if generated:
         narrative.append("".join(generated))
     elif document_cites:
         if not needs_input:
-            result["status"] = "partial" if any(s.get("rows") for s in result["citations"]) else (
+            result["status"] = "partial" if has_data else (
                 "error" if failed else "no_evidence")
         trace.mark("empty")
         notes.append(insufficient_text)
@@ -358,11 +400,10 @@ def query_examples(store):
             curated = finance_suggestions()  # Legacy workspaces predate saved templates.
         template_docs = curated.get("documents", {})
         original = set()
-        if doc and doc["sha256"] == template_docs.get(doc["filename"]):
-            for filename in {ex["document"] for ex in curated["examples"] if ex.get("document")}:
-                if conn.execute("""SELECT 1 FROM documents WHERE filename=? AND sha256=?
-                                   AND active=1 AND chunk_count>0""", (filename, template_docs.get(filename))).fetchone():
-                    original.add(filename)
+        for filename in {ex["document"] for ex in curated.get("examples", []) if ex.get("document")}:
+            if conn.execute("""SELECT 1 FROM documents WHERE filename=? AND sha256=?
+                               AND active=1 AND chunk_count>0""", (filename, template_docs.get(filename))).fetchone():
+                original.add(filename)
     questions = {}
     if doc:
         name = Path(doc["filename"]).stem
@@ -374,8 +415,8 @@ def query_examples(store):
         query = f"查询「{configs[-1]['name']}」的数据记录"
         questions["data"] = query + "？"
         if doc:
-            questions["mixed"] = f"{query}，并说明《{name}》中的相关要求。"
-    # New documents and connectors should take precedence over demo suggestions.
+            questions["mixed"] = f"{query}，并查找文档中对这些数据统计口径的说明。"
+    # Curated pairs must still point to their original source definitions.
     template_connectors = curated.get("connectors", {})
     matching = {c["name"] for c in configs if connector_signature(c) == template_connectors.get(c["name"])}
     if configs and configs[-1]["name"] not in matching:
