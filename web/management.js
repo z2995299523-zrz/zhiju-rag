@@ -4,7 +4,7 @@ import { batchDescription, optionsForm, readOptions, warningsOf } from "./import
 
 const pageSize = 25;
 
-function jsonRequest(method, data) {
+export function jsonRequest(method, data) {
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) };
 }
 
@@ -35,7 +35,7 @@ function typeName(type) {
   return ({ string: "文本", integer: "整数", number: "数值", date: "日期" })[type] || "文本";
 }
 
-function makeDialog(shell, ctx, title, body, className = "") {
+export function makeDialog(shell, ctx, title, body, className = "") {
   const el = document.createElement("dialog");
   el.className = "mg-dialog " + className;
   el.setAttribute("aria-label", title);
@@ -59,7 +59,7 @@ function showError(element, value) {
   element.hidden = false;
 }
 
-function bindCancel(dialog) {
+export function bindCancel(dialog) {
   const btn = dialog.querySelector("[data-cancel]");
   if (btn) btn.addEventListener("click", () => dialog.close());
 }

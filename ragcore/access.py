@@ -29,23 +29,27 @@ def _local_demo(request):
 
 
 def account(request: Request):
+    with request.app.state.store.db() as conn:
+        return account_in_transaction(request, conn)
+
+
+def account_in_transaction(request, conn):
     admin_password = os.environ.get("RAG_ADMIN_PASSWORD")
     token = request.cookies.get("rag_session", "")
-    with request.app.state.store.db() as conn:
-        if not admin_password and not conn.execute("SELECT 1 FROM accounts LIMIT 1").fetchone():
-            if _local_demo(request):
-                return {"role": "admin", "owner": "local", "auth_required": False, "username": None}
-        if len(token) == 48:
-            digest = hashlib.sha256(token.encode()).hexdigest()
-            row = conn.execute("""SELECT s.role,s.principal,a.role AS account_role,a.enabled
-                FROM sessions s LEFT JOIN accounts a ON a.username=s.principal
-                WHERE s.digest=? AND s.expires>?""", (digest, int(time.time()))).fetchone()
-            if row and row["principal"] is not None and row["enabled"]:
-                return {"role": row["account_role"], "owner": "user/" + row["principal"],
-                        "auth_required": True, "username": row["principal"]}
-            if row and row["principal"] is None and admin_password:
-                if row["role"] == "admin" or os.environ.get("RAG_READER_PASSWORD"):
-                    return {"role": row["role"], "owner": digest, "auth_required": True, "username": None}
+    if not admin_password and not conn.execute("SELECT 1 FROM accounts LIMIT 1").fetchone():
+        if _local_demo(request):
+            return {"role": "admin", "owner": "local", "auth_required": False, "username": None}
+    if len(token) == 48:
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        row = conn.execute("""SELECT s.role,s.principal,a.role AS account_role,a.enabled
+            FROM sessions s LEFT JOIN accounts a ON a.username=s.principal
+            WHERE s.digest=? AND s.expires>?""", (digest, int(time.time()))).fetchone()
+        if row and row["principal"] is not None and row["enabled"]:
+            return {"role": row["account_role"], "owner": "user/" + row["principal"],
+                    "auth_required": True, "username": row["principal"]}
+        if row and row["principal"] is None and admin_password:
+            if row["role"] == "admin" or os.environ.get("RAG_READER_PASSWORD"):
+                return {"role": row["role"], "owner": digest, "auth_required": True, "username": None}
     return {"role": None, "owner": None, "auth_required": True, "username": None}
 
 

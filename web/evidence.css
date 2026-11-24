@@ -1,21 +1,21 @@
 :root {
-  --ev-ink: #293335;
-  --ev-muted: #59676a;
-  --ev-teal: #2d696b;
-  --ev-line: #dce3e3;
-  --ev-tint: #eef5f4;
+  --ev-ink: #192641;
+  --ev-muted: #536482;
+  --ev-accent: #264fd6;
+  --ev-line: #dce5f5;
+  --ev-tint: #edf3ff;
 }
 .ev-cite.inline-cite {
   display: inline; font-family: inherit; font-size: .82em; line-height: 1.15;
-  font-weight: 650; color: var(--ev-teal); border: 0; background: var(--ev-tint); border-radius: 4px;
+  font-weight: 650; color: var(--ev-accent); border: 0; background: var(--ev-tint); border-radius: 4px;
   vertical-align: baseline; padding: 2px 5px; margin: 0 2px; cursor: pointer; white-space: nowrap;
 }
-.ev-cite.inline-cite:hover, .ev-cite.inline-cite[aria-expanded="true"] { background: #dcece9; }
+.ev-cite.inline-cite:hover, .ev-cite.inline-cite[aria-expanded="true"] { background: #dce8ff; }
 .answer-copy :is(p,li):has(.ev-cite[aria-expanded="true"]) {
-  background: #edf5f1; border-radius: 3px; box-shadow: -3px 0 #66938c;
+  background: #edf3ff; border-radius: 3px; box-shadow: -3px 0 #6286ed;
 }
 .ev-cite:focus-visible, .ev-panel :focus-visible, .ev-preview :focus-visible {
-  outline: 2px solid var(--ev-teal); outline-offset: 3px;
+  outline: 2px solid var(--ev-accent); outline-offset: 3px;
 }
 .ev-missing-cite { color: var(--ev-muted); font-size: .88em; }
 .ev-panel, .ev-preview {
@@ -40,7 +40,7 @@
   display: grid; place-items: center; flex: none; width: 40px; height: 40px; cursor: pointer;
   color: var(--ev-muted); background: transparent; border: 0; margin-left: auto; border-radius: 6px;
 }
-.ev-close:hover { color: var(--ev-teal); background: var(--ev-tint); }
+.ev-close:hover { color: var(--ev-accent); background: var(--ev-tint); }
 .ev-content { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 5px 22px 20px; }
 .ev-source { padding-inline: 1px; border-bottom: 1px solid var(--ev-line); }
 .ev-source:last-child { border-bottom: 0; }
@@ -52,21 +52,21 @@
 .ev-source > summary:focus-visible { outline-offset: -2px; border-radius: 3px; }
 .ev-source summary strong { font-size: 15px; font-weight: 650; color: var(--ev-ink); overflow-wrap: anywhere; }
 .ev-kind { display: inline-flex; align-items: center; gap: 7px; color: var(--ev-muted); font-size: 12px; }
-.ev-kind svg { color: var(--ev-teal); }
-.ev-number { justify-self: end; color: var(--ev-teal); font: 600 12px/1.8 Consolas, monospace; }
+.ev-kind svg { color: var(--ev-accent); }
+.ev-number { justify-self: end; color: var(--ev-accent); font: 600 12px/1.8 Consolas, monospace; }
 .ev-chevron { display: flex; justify-content: flex-end; color: var(--ev-muted); }
 .ev-source[open] .ev-chevron svg { transform: rotate(180deg); }
-.ev-source summary:hover strong { color: var(--ev-teal); }
+.ev-source summary:hover strong { color: var(--ev-accent); }
 .ev-card-body { padding: 0 0 20px; overflow-wrap: anywhere; }
 .ev-card-body .ev-locator { font-size: 12px; line-height: 1.5; margin: 0 0 13px; color: var(--ev-muted); }
 .ev-card-body blockquote {
-  color: #364244; background: #f6f8f8; border: 0; border-left: 2px solid #87aeac; margin: 0 0 12px;
+  color: #344767; background: #f4f7ff; border: 0; border-left: 2px solid #91aae9; margin: 0 0 12px;
   padding: 11px 13px; font-size: 14px; line-height: 1.85; white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.ev-card-body blockquote mark { color: inherit; background: #e3eeea; }
+.ev-card-body blockquote mark { color: inherit; background: #e8f0ff; }
 .ev-records pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; }
 .ev-read {
-  display: inline-flex; align-items: center; gap: 7px; color: var(--ev-teal); text-decoration: none;
+  display: inline-flex; align-items: center; gap: 7px; color: var(--ev-accent); text-decoration: none;
   min-height: 36px; font-size: 13px; font-weight: 600; padding: 0 2px;
 }
 .ev-read:hover, .ev-downloads button:hover { text-decoration: underline; text-underline-offset: 3px; }
@@ -74,25 +74,25 @@
 .ev-api-meta { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px 16px; font-size: 13px; line-height: 1.65; margin: 0; }
 .ev-api-meta dt { color: var(--ev-muted); font-size: 12px; }
 .ev-api-meta dd { margin: 0; min-width: 0; }
-.ev-filter { display: inline-block; padding: 2px 8px; background: #f3f6f6; border-radius: 4px; margin: 1px 5px 2px 0; }
+.ev-filter { display: inline-block; padding: 2px 8px; background: #f2f6ff; border-radius: 4px; margin: 1px 5px 2px 0; }
 .ev-records { margin-top: 14px; font-size: 13px; }
-.ev-records summary { color: var(--ev-teal); cursor: pointer; }
-.ev-records dl { border-left: 2px solid #b5cbc9; padding-left: 11px; margin: 11px 0; }
+.ev-records summary { color: var(--ev-accent); cursor: pointer; }
+.ev-records dl { border-left: 2px solid #b4c6ed; padding-left: 11px; margin: 11px 0; }
 .ev-records dl > div { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; }
 .ev-records dt { color: var(--ev-muted); }
 .ev-records dd { margin: 0; text-align: right; }
 .ev-downloads { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; font-size: 12px; }
-.ev-downloads button { border: 0; background: transparent; color: var(--ev-teal); cursor: pointer; font: inherit; padding: 5px 0; }
+.ev-downloads button { border: 0; background: transparent; color: var(--ev-accent); cursor: pointer; font: inherit; padding: 5px 0; }
 .ev-download-status { margin: 6px 0 0; color: var(--ev-muted); font-size: 12px; line-height: 1.65; }
 .ev-download-status:empty { display: none; }
 .ev-preview[open] {
   display: flex; flex-direction: column; position: fixed; inset: 0; margin: auto;
   width: min(1060px, calc(100% - 64px)); height: min(92dvh, 940px);
-  border: 1px solid #c5d0cf; border-radius: 9px; overscroll-behavior: contain;
+  border: 1px solid #c8d7f4; border-radius: 9px; overscroll-behavior: contain;
 }
 .ev-preview-head { min-height: 52px; }
 .ev-preview-head h2 { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; }
-.ev-preview-head h2 svg { color: var(--ev-teal); }
+.ev-preview-head h2 svg { color: var(--ev-accent); }
 .ev-preview-head .ev-read { margin-left: auto; }
 .ev-preview-head .ev-close { margin-left: 0; }
 .ev-preview-notice { padding: 16px 24px; color: var(--ev-muted); }

@@ -2,6 +2,7 @@ import { renderManagement } from "./management.js";
 import { renderAdmin } from "./admin.js";
 import { openEvidence, closeEvidence, refreshEvidence } from "./evidence.js";
 import { events, renderMarkdown } from "./answer.js";
+import { renderLogin } from "./login.js";
 
 const $ = (id) => document.getElementById(id);
 const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -37,6 +38,8 @@ const paths = {
   book: '<path d="M3 4h6a4 4 0 0 1 3 2 4 4 0 0 1 3-2h6v15h-6a4 4 0 0 0-3 2 4 4 0 0 0-3-2H3zM12 6v15"/>',
   menu: '<path d="M3 6h18M3 12h18M3 18h18"/>',
   logout: '<path d="M9 3H4v18h5m2-9h10m-4-4 4 4-4 4"/>',
+  eye: '<path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6Z"/><circle cx="12" cy="12" r="2.5"/>',
+  eyeOff: '<path d="m3 3 18 18M10.5 6.1 12 6c6.5 0 10 6 10 6a16 16 0 0 1-3 3.4M6.5 7.5A17 17 0 0 0 2 12s3.5 6 10 6c1.3 0 2.5-.2 3.6-.7"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21v-2a7 7 0 0 1 7-6h2a7 7 0 0 1 7 6v2"/>',
   grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
   quote: '<path d="M3 11h6v7H3v-6c0-4 2-6 6-7m5 6h6v7h-6v-6c0-4 2-6 6-7"/>',
@@ -48,8 +51,9 @@ function icon(name, size = 18) {
   return `<svg class="ui-icon" aria-hidden="true" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">${paths[name] ?? ""}</svg>`;
 }
 
-const pages = { ask:"知识问答", documents:"文档库", admin:"知识库概览", imports:"导入管理", connectors:"数据接口配置", models:"模型配置", retrieval:"检索评测" };
-const managementPages = new Set(["admin", "imports", "connectors", "models", "retrieval"]);
+const brand = "澄知 RAG";
+const pages = { ask:"知识问答", documents:"文档库", admin:"知识库概览", imports:"导入管理", connectors:"数据接口配置", models:"模型配置", retrieval:"检索评测", accounts:"用户管理", account:"个人账号" };
+const managementPages = new Set(["admin", "imports", "connectors", "models", "retrieval", "accounts"]);
 const modes = { mixed:"综合查询", auto:"自动判断", documents:"文档检索", data:"接口查询" };
 const statuses = { answered:"已回答", partial:"部分回答", needs_input:"待补充", no_evidence:"缺少证据", error:"查询失败" };
 const state = {
@@ -107,14 +111,7 @@ async function request(path, options = {}) {
   if (response.ok) return response;
   const payload = await response.json().catch(() => ({}));
   if (response.status === 401 && canUseWorkspace() && path !== "/api/login") {
-    drafts.clear();
-    state.session = {authenticated:false, auth_required:true};
-    clearTimeout(searchTimer);
-    state.historySequence++;
-    Object.assign(state, {history:[], historyFilter:"", historyBusy:false, historyMore:false, historyError:"", historyOffset:0});
-    $("history-search").value = "";
-    resetAsk();
-    showLogin();
+    requireLogin("登录已失效，请重新登录。", state.session.username);
   }
   const detail = payload.detail ?? payload.error ?? payload.message ?? `请求失败（${response.status}）`;
   throw new Error(Array.isArray(detail) ? detail.map(item => item.msg || String(item)).join("，") : String(detail));
@@ -144,6 +141,7 @@ function historyDay(value) {
 
 function drawNavigation() {
   const signedIn = canUseWorkspace();
+  document.body.classList.toggle("signed-out", !signedIn);
   $("sidebar-body").hidden = !signedIn;
   $("admin-link").hidden = !canManage();
   $("open-menu").disabled = !signedIn;
@@ -158,13 +156,10 @@ function drawNavigation() {
   const role = canManage() ? "管理员" : "只读成员";
   const name = state.session.username || (state.session.auth_required ? role : "本地工作区");
   const detail = (state.session.username || !state.session.auth_required) ? role : "已登录";
-  $("user-area").innerHTML = `<span class="avatar">${icon("user",17)}</span>
-    <div class="profile"><strong>${esc(name)}</strong><small>${esc(detail)}</small></div>
+  $("user-area").innerHTML = `<a href="#account" class="profile-link" title="个人账号" ${state.page === "account" ? 'aria-current="page"' : ""}>
+    <span class="avatar">${icon("user",17)}</span><span class="profile"><strong>${esc(name)}</strong><small>${esc(detail)}</small></span></a>
     ${state.session.auth_required ? `<button class="icon-button" id="logout" title="退出登录" aria-label="退出登录">${icon("logout",16)}</button>` : ""}`;
-  $("logout")?.addEventListener("click", async () => {
-    try { await api("/api/logout", {method:"POST"}); location.reload(); }
-    catch (error) { notify(error.message, true); }
-  });
+  $("logout")?.addEventListener("click", event => signOut(event.currentTarget));
   drawHistory();
 }
 
@@ -249,26 +244,43 @@ function composer(landing) {
     </form>`;
 }
 
-function showLogin() {
+function requireLogin(message, username) {
+  drafts.clear();
+  state.session = {authenticated:false, auth_required:true};
+  clearTimeout(searchTimer);
+  state.historySequence++;
+  Object.assign(state, {history:[], historyFilter:"", historyBusy:false, historyMore:false, historyError:"", historyOffset:0});
+  $("history-search").value = "";
+  $("toast").hidden = true;
+  resetAsk();
+  showLogin(message, username);
+}
+
+async function signOut(button) {
+  button.disabled = true;
+  try {
+    await api("/api/logout", {method:"POST"});
+    history.replaceState(null, "", "#ask");
+    requireLogin("已退出登录。");
+  } catch (error) {
+    notify(error.message, true);
+    button.disabled = false;
+  }
+}
+
+function showLogin(message, username) {
   closeMenu();
   drawNavigation();
-  $("main").innerHTML = `<section class="login-card"><h1>登录工作区</h1>
-    <form id="login-form"><label for="username">用户名（选填）</label>
-    <input id="username" name="username" type="text" autocomplete="username" placeholder="使用角色密码时可留空">
-    <label for="password">访问密码</label><input id="password" name="password" type="password" required autocomplete="current-password">
-    <p class="form-error" id="login-error" role="alert"></p><button class="primary-btn">登录 ${icon("arrow",16)}</button></form></section>`;
-  $("login-form").addEventListener("submit", async event => {
-    event.preventDefault();
-    const btn = event.currentTarget.querySelector("button");
-    btn.disabled = true;
-    try {
-      await api("/api/login", jsonOptions({username:$("username").value.trim() || undefined, password:$("password").value}));
-      await boot();
-    } catch (error) {
-      if ($("login-error")) $("login-error").textContent = error.message;
-      btn.disabled = false;
+  document.title = "登录工作区 · " + brand;
+  renderLogin($("main"), { icon, message, username, async signIn(credentials) {
+    state.session = await api("/api/login", jsonOptions(credentials));
+    void route();
+    if (canUseWorkspace()) {
+      if (state.page === "ask" && $("question") && !smallScreen.matches) $("question").focus({preventScroll:true});
+      else $("main").focus({preventScroll:true});
+      void loadHistory();
     }
-  });
+  }});
 }
 
 async function addFollowUp(result, section, turnKey) {
@@ -350,7 +362,7 @@ function makeTurn(turn) {
   const time = formatTime(turn.result.created_at);
   article.innerHTML = `<header class="asked"><div class="question-meta">提问${time ? " · " + esc(time) : ""}</div><h2>${esc(turn.request.question)}</h2></header>
     <section class="answer-section"><header class="answer-title"><span class="answer-symbol">${icon("layers",17)}</span>
-    <h3>知据</h3><span class="answer-status" role="status"></span></header><div class="answer-copy"></div>
+    <h3>${brand}</h3><span class="answer-status" role="status"></span></header><div class="answer-copy"></div>
     <div class="turn-table"></div><div class="turn-follow-up"></div><div class="answer-sources"></div></section>`;
   return article;
 }
@@ -600,6 +612,7 @@ function newQuestion() {
 
 async function route() {
   if (!state.session) return;
+  if (!canUseWorkspace()) { if (!$("login-form")) showLogin(); return; }
   if ($("answer-scroll")) state.scrollTop = $("answer-scroll").scrollTop;
   stopQuery();
   if (state.page === "ask") rememberDraft();
@@ -609,8 +622,7 @@ async function route() {
   const page = Object.hasOwn(pages, hash) ? hash : "ask";
   state.page = managementPages.has(page) && !canManage() ? "ask" : page;
   if (hash && !match && hash !== "history" && hash !== state.page) history.replaceState(null, "", "#" + state.page);
-  document.title = pages[state.page] + " · 知据";
-  if (!canUseWorkspace()) { showLogin(); return; }
+  document.title = pages[state.page] + " · " + brand;
   drawNavigation();
   if (state.page === "ask") {
     const cached = match ? [...drafts.values()].find(item => String(item.latestId) === match[1]) : drafts.get(history.state?.chatKey);
@@ -643,9 +655,14 @@ async function route() {
   const container = document.createElement("div");
   container.className = "workspace";
   $("main").replaceChildren(container);
-  const ctx = {api, notify, canManage:canManage(), icon, esc, refresh:() => Promise.resolve()};
+  const ctx = {api, notify, canManage:canManage(), icon, esc, refresh:() => Promise.resolve(), session:state.session, requireLogin, signOut};
   try {
     if (state.page === "admin") await renderAdmin(container, ctx);
+    else if (state.page === "accounts" || state.page === "account") {
+      const personal = state.page === "account";
+      const {renderAccount, renderAccounts} = await import("./accounts.js");
+      if (container.isConnected) await (personal ? renderAccount : renderAccounts)(container, ctx);
+    }
     else if (state.page === "retrieval") {
       const {renderRetrievalCheck} = await import("./retrieval-check.js");
       if (container.isConnected) await renderRetrievalCheck(container, ctx);

@@ -17,6 +17,10 @@ _ITERATIONS = 600_000
 _USER = re.compile(r"[\w][\w.-]{0,63}\Z", re.UNICODE)
 
 
+class AccountConflict(ValueError):
+    pass
+
+
 def normalize_username(value):
     name = unicodedata.normalize("NFKC", value).strip().casefold()
     if not _USER.fullmatch(name):
@@ -49,33 +53,79 @@ def password_matches(password, account):
     return bool(account and account["enabled"] and matched)
 
 
-def manage(store, action, username, *, password=None, role=None):
+def list_accounts(store):
+    with store.db() as conn:
+        rows = conn.execute("SELECT username,role,enabled FROM accounts ORDER BY username").fetchall()
+    return [{"username": row["username"], "role": row["role"], "enabled": bool(row["enabled"])} for row in rows]
+
+
+def manage(store, action, username, *, password=None, role=None, enabled=None,
+           actor="cli", authorize=None, current_password=None):
     name = normalize_username(username)
-    if action not in {"add", "passwd", "disable"} or (action == "add" and role not in {"admin", "reader"}):
+    if (action not in {"add", "passwd", "disable", "update"}
+            or (action in {"add", "update"} and role not in {"admin", "reader"})
+            or (action == "update" and type(enabled) is not bool)):
         raise ValueError("无效的账号操作或角色")
-    if action != "disable":
+    if action in {"add", "passwd"}:
         if not isinstance(password, str) or not 12 <= len(password) <= 1024:
             raise ValueError("个人账号密码长度须为 12–1024 个字符")
         salt = secrets.token_bytes(16)
-        password_hash = _derive(password, salt, _ITERATIONS)
+        try:
+            password_hash = _derive(password, salt, _ITERATIONS)
+        except UnicodeEncodeError as exc:
+            raise ValueError("密码含无效字符") from exc
+    if current_password is not None:
+        with store.db() as conn:
+            snapshot = conn.execute("SELECT * FROM accounts WHERE username=?", (name,)).fetchone()
+        try:
+            verified = password_matches(current_password, snapshot)
+        except UnicodeEncodeError:
+            verified = False
+        if not verified:
+            raise ValueError("当前密码错误")
     with store.db() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        if authorize:
+            authorize(conn)
         if action == "add":
+            if authorize and role != "admin" and not os.getenv("RAG_ADMIN_PASSWORD") and not conn.execute(
+                    "SELECT 1 FROM accounts WHERE role='admin' AND enabled=1 LIMIT 1").fetchone():
+                raise AccountConflict("请先创建启用的管理员账号")
             try:
                 conn.execute("""INSERT INTO accounts(username,role,enabled,salt,password_hash,iterations)
                              VALUES (?,?,1,?,?,?)""", (name, role, salt, password_hash, _ITERATIONS))
             except sqlite3.IntegrityError as exc:
-                raise ValueError("该用户名已存在") from exc
+                raise AccountConflict("该用户名已存在") from exc
+        elif action == "update":
+            old = conn.execute("SELECT role,enabled FROM accounts WHERE username=?", (name,)).fetchone()
+            if old is None:
+                raise KeyError(name)
+            if (old["role"], bool(old["enabled"])) == (role, enabled):
+                return name
+            if (role != "admin" or not enabled) and actor == "user/" + name:
+                raise AccountConflict("当前账号不能停用自己或移除自己的管理员权限")
+            if old["role"] == "admin" and old["enabled"] and (role != "admin" or not enabled):
+                if not os.getenv("RAG_ADMIN_PASSWORD") and not conn.execute("""SELECT 1 FROM accounts
+                        WHERE role='admin' AND enabled=1 AND username<>? LIMIT 1""", (name,)).fetchone():
+                    raise AccountConflict("工作区至少需要一个启用的管理员账号")
+            conn.execute("UPDATE accounts SET role=?,enabled=? WHERE username=?", (role, enabled, name))
+            conn.execute("DELETE FROM sessions WHERE principal=?", (name,))
         else:
+            if current_password is not None:
+                latest = conn.execute("SELECT password_hash FROM accounts WHERE username=? AND enabled=1", (name,)).fetchone()
+                if latest is None or latest["password_hash"] != snapshot["password_hash"]:
+                    raise AccountConflict("账号状态已变化，请重新登录")
             if action == "disable":
                 cursor = conn.execute("UPDATE accounts SET enabled=0 WHERE username=?", (name,))
             else:
                 cursor = conn.execute("""UPDATE accounts SET salt=?, password_hash=?, iterations=?
                                       WHERE username=?""", (salt, password_hash, _ITERATIONS, name))
             if not cursor.rowcount:
+                if authorize:
+                    raise KeyError(name)
                 raise ValueError("该用户名不存在")
             conn.execute("DELETE FROM sessions WHERE principal=?", (name,))
-        store.audit(conn, "cli", "account." + action, "user/" + name)
+        store.audit(conn, actor, "account." + action, "user/" + name)
     return name
 
 

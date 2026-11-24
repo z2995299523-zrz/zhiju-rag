@@ -11,7 +11,7 @@ import sys
 import time
 import webbrowser
 
-from ragcore import __version__
+from ragcore import APP_TITLE, __version__
 from ragcore.workspace_id import workspace_id
 
 
@@ -127,9 +127,10 @@ def service_state(port):
         schema = response_json(port, "/api/openapi.json")
         paths = schema.get("paths", {})
         required = {"/api/query", "/api/query/stream", "/api/query/examples", "/api/admin/models",
-                    "/api/documents", "/api/documents/{doc_id}/preview", "/api/admin/retrieval/evaluate"}
+                    "/api/documents", "/api/documents/{doc_id}/preview", "/api/admin/retrieval/evaluate",
+                    "/api/admin/accounts", "/api/account/password"}
         info = schema.get("info", {})
-        if (info.get("title") == "企业知识检索工作台" and info.get("version") == __version__ and required.issubset(paths)
+        if (info.get("title") == APP_TITLE and info.get("version") == __version__ and required.issubset(paths)
                 and supports_embedded_reader(port)):
             return "ready"
     except (OSError, ValueError, AttributeError, http.client.HTTPException):
@@ -167,7 +168,7 @@ def run(explicit_port, no_browser):
     if state == "other":
         raise RuntimeError(f"端口 {port} 已被其他程序占用或服务无响应。可运行 .\\start.cmd --port {port+1 if port<65535 else 8782}。")
     executable = choose_runtime()
-    print(f"启动知据（{executable}）。保持此窗口开启，按 Ctrl+C 可停止服务。", flush=True)
+    print(f"启动澄知 RAG（{executable}）。保持此窗口开启，按 Ctrl+C 可停止服务。", flush=True)
     child = subprocess.Popen([str(executable), "-m", "uvicorn", "main:app", "--host", "127.0.0.1",
                               "--port", str(port), "--no-proxy-headers"], cwd=ROOT)
     try:

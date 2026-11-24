@@ -20,7 +20,8 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from ragcore import __version__, access, model_config, models
+from ragcore import APP_TITLE, __version__, access, model_config, models
+from ragcore.account_api import router as account_router
 from ragcore.connectors import ConnectorError, execute, validate_config
 from ragcore.documents import MAX_FILE_BYTES, SUPPORTED_EXTENSIONS
 from ragcore.import_schema import ImportOptions, PARSER_VERSION
@@ -105,9 +106,10 @@ def create_app(data_dir=None, seed=None):
         instance.state.workspace_id = workspace_id(store.path.parent)
         yield
 
-    app = FastAPI(title="企业知识检索工作台", version=__version__, docs_url=None, redoc_url=None,
+    app = FastAPI(title=APP_TITLE, version=__version__, docs_url=None, redoc_url=None,
                   openapi_url="/api/openapi.json", lifespan=lifespan)
     app.middleware("http")(access.guard)
+    app.include_router(account_router)
     app.include_router(preview_router)
     app.include_router(retrieval_check_router)
 

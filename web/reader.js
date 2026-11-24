@@ -162,7 +162,7 @@ function displayMode(native) {
 
 function render(data) {
   const doc = data.document;
-  document.title = doc.filename + " · 知据";
+  document.title = doc.filename + " · 澄知 RAG";
   byId("filename").textContent = doc.filename;
   byId("extension").textContent = (doc.filename.match(/\.([^.]+)$/)?.[1] || "").toUpperCase();
   byId("file-size").textContent = displaySize(doc.size);

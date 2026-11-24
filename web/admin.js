@@ -20,7 +20,7 @@ const displayTime = new Intl.DateTimeFormat("zh-CN", {
 });
 
 export function managementNav(active) {
-  const sections = [["admin", "知识库概览"], ["imports", "导入管理"], ["connectors", "数据接口配置"], ["models", "模型配置"], ["retrieval", "检索评测"]];
+  const sections = [["admin", "知识库概览"], ["imports", "导入管理"], ["connectors", "数据接口配置"], ["models", "模型配置"], ["retrieval", "检索评测"], ["accounts", "用户管理"]];
   return `<nav class="adm-nav" aria-label="管理功能">${sections.map(([route, label]) =>
     `<a href="#${route}"${active === route ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>`;
 }

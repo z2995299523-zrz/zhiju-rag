@@ -7,8 +7,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+from main import create_app
 from ragcore import access, accounts
 from ragcore.storage import Store
 
@@ -130,3 +132,46 @@ class AccountTests(unittest.TestCase):
                     accounts.main(["add", "cli.user", "--role", "admin"])
             self.assertEqual(access.admin(self.request(self.token("cli.user", "long CLI user pass")))["username"],
                              "cli.user")
+
+    def test_workspace_account_lifecycle(self):
+        base = "/api/admin/accounts"
+        password = "initial long passphrase"
+        new_password = "updated long passphrase"
+        app = create_app(self.store.path.parent, seed=False)
+        with (TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 8000)) as admin,
+              TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 8001)) as reader,
+              TestClient(app) as guest):
+            self.assertEqual(guest.get(base).status_code, 401)
+            self.assertEqual(admin.get(base).json(), [])
+            root = {"username": "Operator", "role": "admin", "password": password}
+            self.assertEqual(admin.post(base, json={**root, "role": "reader"}).status_code, 409)
+            self.assertEqual(admin.post(base, json=root).json(), {
+                "username": "operator", "role": "admin", "enabled": True, "login_required": True})
+            self.assertEqual(admin.get(base).status_code, 401)
+            self.assertEqual(admin.post("/api/login", json=root).status_code, 200)
+            self.assertEqual(admin.post(base, json=root).status_code, 409)
+            self.assertEqual(admin.put(base + "/operator", json={"role": "reader", "enabled": True}).status_code, 409)
+
+            member = {"username": "测试.读者", "role": "reader", "password": password}
+            member_path = base + "/" + member["username"]
+            self.assertEqual(admin.post(base, json=member).status_code, 201)
+            self.assertEqual(admin.get(base).json(), [
+                {"username": "operator", "role": "admin", "enabled": True},
+                {"username": member["username"], "role": "reader", "enabled": True}])
+            self.assertEqual(reader.post("/api/login", json=member).status_code, 200)
+            self.assertEqual(reader.get(base).status_code, 403)
+            self.assertEqual(reader.put(member_path, json={"role": "admin", "enabled": True}).status_code, 403)
+            self.assertEqual(admin.put(member_path, json={"role": "reader", "enabled": False}).status_code, 200)
+            self.assertFalse(reader.get("/api/session").json()["authenticated"])
+            self.assertEqual(reader.post("/api/login", json=member).status_code, 401)
+            self.assertEqual(admin.put(member_path, json={"role": "reader", "enabled": True}).status_code, 200)
+            self.assertEqual(reader.post("/api/login", json=member).status_code, 200)
+            self.assertEqual(admin.put(member_path + "/password", json={"password": new_password}).status_code, 204)
+            self.assertFalse(reader.get("/api/session").json()["authenticated"])
+            self.assertEqual(reader.post("/api/login", json={**member, "password": new_password}).status_code, 200)
+            own_password = "/api/account/password"
+            self.assertEqual(reader.put(own_password, json={"current_password": password, "password": password}).status_code, 422)
+            self.assertTrue(reader.get("/api/session").json()["authenticated"])
+            self.assertEqual(reader.put(own_password, json={"current_password": new_password, "password": password}).status_code, 204)
+            self.assertFalse(reader.get("/api/session").json()["authenticated"])
+            self.assertEqual(reader.post("/api/login", json=member).status_code, 200)

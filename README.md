@@ -1,8 +1,15 @@
-# 知据 · 企业知识工作台
+# 澄知 RAG
 
-在同一条问答里查制度原文和业务数据。文件答案可回到页、行、工作表或段落，业务数值可回到当次只读接口请求和返回记录。标准版 **v1.5.0** 包含中文 Web 工作台、FastAPI 服务和 SQLite 存储。新工作区默认空白，导入资料后即可使用本地检索。管理员可随时接入对话模型和向量模型。
+**澄知 RAG 是面向企业内部知识平台的标准化 RAG（检索增强生成）框架。** 科研、制造、财务及其他行业的企业可以使用同一套框架，把内部文档和业务系统的只读接口接入自己的知识平台。框架将资料导入、检索与重排、问答生成、证据归档和检索评测串在同一条流程中。通过行业模板、数据目录、模型配置和验收题集，可以为不同企业或业务场景独立部署。
 
-按行业交付时可复用同一版本，分别设置数据目录、模型、初始资料、只读业务接口和验收题。[行业模板与部署示例](docs/industry-profiles.md) · [五个高星 RAG 项目调研](docs/rag-projects.md) · [v1.5.0 整改与验收](docs/v1.5.0-整改验收.md)
+| 框架能力 | 企业如何使用 |
+| --- | --- |
+| 知识接入 | 导入 PDF、Office、文本和结构化文件，统一解析、分块、索引和管理原件版本。可选本地 OCR |
+| 检索与问答 | 本地全文检索，可配置向量重排和兼容 OpenAI 协议的对话模型。支持文档问答、接口查数和综合查询 |
+| 证据追溯 | 文档答案定位到页、行、工作表或段落。业务数字可核对当次接口筛选条件和响应快照 |
+| 平台运营 | 中文 Web 工作台提供导入管理、模型配置、检索评测、执行诊断和用户管理。FastAPI 提供可集成的服务接口 |
+
+标准版 **v1.5.0** 随附 Web 工作台、FastAPI 服务和 SQLite 存储。默认空白工作区导入自己的资料后即可体验。仓库提供科研财务和制造设备两套演示，可按行业替换资料、业务接口和验收题。[行业模板与部署示例](docs/industry-profiles.md) · [五个高星 RAG 项目调研](docs/rag-projects.md) · [v1.5.0 整改与验收](docs/v1.5.0-整改验收.md)
 
 ## 本机启动
 
@@ -120,6 +127,8 @@ $env:RAG_OCR_ENABLED = "1"
 | 操作 | 请求 |
 | --- | --- |
 | 登录 | `POST /api/login`，具名账号提交 `{"username":"analyst","password":"…"}`，共享角色提交 `{"password":"…"}`，后续请求携带响应设置的会话 Cookie |
+| 会话与个人改密 | `GET /api/session` 查看当前身份，`POST /api/logout` 退出。个人账号通过 `PUT /api/account/password` 提交 `current_password` 和新 `password`，成功后重新登录 |
+| 用户管理（管理员） | `GET /api/admin/accounts` 查询用户，`POST /api/admin/accounts` 创建用户，`PUT /api/admin/accounts/{username}` 保存角色和启用状态，`PUT /api/admin/accounts/{username}/password` 重置用户密码 |
 | 问答 | `POST /api/query`，正文 `{"question":"科研项目经费报销需要哪些材料？","mode":"auto"}`，返回 `answer`、`intent`、`status` 和 `citations` |
 | 流式问答 | `POST /api/query/stream` 接收相同请求，可用 `parent_id` 继续自己的历史会话。同一轮重试时复用 `request_id`（UUID），已归档的回答可直接恢复。SSE 事件包括阶段（`status`）、正文增量（`delta`）、真实依据（`evidence`）、已归档结果（`done`）和异常（`error`）。`GET /api/query/examples` 按已接入来源返回示例 |
 | 上传 / 下载原件 | `POST /api/documents`，multipart 表单中以 `files` 重复提交文件，按 `imported` 和 `errors` 检查每份结果。`GET /api/documents/{id}/download` 下载原件 |
@@ -136,7 +145,9 @@ $env:RAG_OCR_ENABLED = "1"
 
 ## 部署与运行边界
 
-空白账号配置下，只有服务端与访问端均为回环地址的本机直连可免密体验。具名用户可由管理员在相同 `RAG_DATA_DIR` 下创建，密码通过交互输入。创建首个账号后，本机也需要登录。个人查询记录可跨次登录回看。
+空白账号配置下，只有服务端与访问端均为回环地址的本机直连可免密体验。本机可在 **管理后台 → 用户管理** 创建首个个人管理员，创建后使用该账号登录。管理员可以继续创建用户、调整角色、启停账号和重置密码。个人账号可从侧栏底部进入账号页修改自己的密码。个人历史可跨次登录回看。
+
+远程部署也可以先在相同的 `RAG_DATA_DIR` 下通过命令行创建管理员。密码通过交互输入。
 
 ```sh
 python -m ragcore.accounts add analyst --role reader
