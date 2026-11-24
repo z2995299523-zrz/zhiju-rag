@@ -281,7 +281,7 @@ class ReaderApiTests(unittest.TestCase):
         doc = self.upload("notice.html", html)
         fake = self.add_stored("bad.jpg", html)
         office = self.add_stored("layout.docx", b"original office bytes")
-        self.assertEqual(self.ok(self.reader.get(f"/api/documents/{doc}/original-info"))["original_kind"], "text")
+        self.assertEqual(self.ok(self.reader.get(f"/api/documents/{doc}/original-info"))["original_kind"], "html")
         for ident in (office, fake):
             self.assertIsNone(self.ok(self.reader.get(f"/api/documents/{ident}/original-info"))["original_kind"])
         for ident in (doc, fake):
@@ -291,6 +291,25 @@ class ReaderApiTests(unittest.TestCase):
             self.assertEqual(self.reader.get(f"/api/documents/{ident}/original").status_code, 415)
             download = self.reader.get(f"/api/documents/{ident}/download")
             self.assertTrue(download.headers["content-disposition"].startswith("attachment;"))
+
+    def test_original_preview_routes_for_rich_documents(self):
+        for name, kind in (("文件.md", "markdown"), ("工作簿.xlsx", "workbook"), ("演示.pptx", "slides")):
+            ident = self.add_stored(name, b"original")
+            self.assertEqual(self.ok(self.reader.get(f"/api/documents/{ident}/original-info"))["original_kind"], kind)
+            self.assertEqual(self.reader.get(f"/api/documents/{ident}/html-preview").status_code, 415)
+        original = "<style>h1{color:blue}</style><h1>网页标题</h1><script>ignored()</script>"
+        ident = self.upload("网页.htm", original.encode("gb18030"))
+        path = f"/api/documents/{ident}/html-preview"
+        response = self.reader.get(path)
+        self.assertEqual((response.status_code, response.text), (200, original))
+        self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
+        self.assertEqual(response.headers["x-frame-options"], "SAMEORIGIN")
+        policy = response.headers["content-security-policy"]
+        self.assertIn("sandbox; default-src 'none'", policy)
+        self.assertIn("style-src 'unsafe-inline'", policy)
+        self.assertIn("form-action 'none'", policy)
+        self.ok(self.reader.post("/api/logout"))
+        self.assertEqual(self.reader.get(path).status_code, 401)
 
     def test_admin_overview_and_scoped_search_across_pages(self):
         def ask(client, question):

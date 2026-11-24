@@ -52,7 +52,9 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8781 --no-proxy-headers
 | 回答引用了错行、表头或页码 | 在「导入管理」的导入结果或文件行点击「分块对照」。选择一个实际入库分块，在旁边核对对应版本的原件；窄屏可切换两者。PDF 按页定位，图片显示原图，文本按可用行号定位，XLSX 读取工作表中的原始单元格。需要原始版式的 DOCX、PPTX 可按提示下载核对 |
 | 提问用词和制度原文不同 | 在「管理后台 → 检索评测」输入问题，指定期望的文档或分块和检查名次。页面显示候选是否命中、重排后排第几，以及实际排在前面的分块。评测使用当前工作区的检索和向量配置，可以从结果打开原文。单题评测独立于问答历史 |
 
-在文档库点文件名或“在线查看”即可打开已保存的原件，现有文档无需重新导入。PDF 交给浏览器内置阅读器，引用链接会打开当时版本并定位到原页。PNG、JPEG 显示原图。文本及结构化文本按源文件内容显示，HTML 以源代码查看。Office、TIFF 等格式可下载原件，使用对应应用查看版式。管理员可在「导入管理 → 分块对照」核对检索使用的解析结果。
+在文档库点文件名或“在线查看”即可打开已保存的原件，现有文档无需重新导入。PDF 交给浏览器内置阅读器，PNG、JPEG 显示原图。PPTX 按幻灯片画布预览，可选页；XLSX 按工作表展示表格、原始行列号、合并单元格和公式文本（或源文件已保存的公式结果）。从引用打开时可定位到 PDF 原页、PPTX 幻灯片或 XLSX 单元格。
+
+Markdown 显示格式化正文，HTML 显示隔离的静态网页，支持文件内样式与内嵌图片。HTML 预览关闭脚本、表单提交和外部资源加载。TXT、CSV 等文本按源文件内容显示。复杂的 Office 特效、图表和动画可下载原件核对，DOCX、TIFF 也可下载后用对应应用查看。管理员可在「导入管理 → 分块对照」核对检索使用的解析结果。
 
 | 文件 | 可核验位置 |
 | --- | --- |
@@ -134,7 +136,7 @@ $env:RAG_OCR_ENABLED = "1"
 | 问答 | `POST /api/query`，正文 `{"question":"科研项目经费报销需要哪些材料？","mode":"auto"}`，返回 `answer`、`intent`、`status` 和 `citations` |
 | 流式问答 | `POST /api/query/stream` 接收相同请求，可用 `parent_id` 继续自己的历史会话。同一轮重试时复用 `request_id`（UUID），已归档的回答可直接恢复。SSE 事件包括阶段（`status`）、正文增量（`delta`）、真实依据（`evidence`）、已归档结果（`done`）和异常（`error`）。`GET /api/query/examples` 按已接入来源返回示例 |
 | 上传 / 下载原件 | `POST /api/documents`，multipart 表单中以 `files` 重复提交文件，按 `imported` 和 `errors` 检查每份结果。`GET /api/documents/{id}/download` 下载原件 |
-| 在线阅读 | `GET /api/documents/{id}/original-info` 读取原件信息，可用 `chunk_id` 查引用位置。`GET /api/documents/{id}/original` 返回可内嵌的 PDF 或图片原字节 |
+| 在线阅读 | `GET /api/documents/{id}/original-info` 读取原件信息，可用 `chunk_id` 查引用位置。`GET /api/documents/{id}/original` 返回可内嵌的 PDF 或图片原字节。`GET /api/documents/{id}/html-preview` 返回隔离的网页预览 |
 | 检索分块 | `GET /api/documents/{id}/preview` 用 `q` 搜索分块文本或位置，`limit`、`offset` 分页，也可用 `chunk_id` 定位分块 |
 | 管理 / 测试接口 | `POST /api/connectors`、`PUT /api/connectors/{id}`、`POST /api/connectors/{id}/test`，测试正文示例 `{"params":{"year":2026}}` |
 | 模型配置（管理员） | `GET /api/admin/models` 查看生效配置；`PUT /api/admin/models/{kind}` 保存；`POST /api/admin/models/{kind}/test` 测试已保存配置或提交的草稿。`kind` 取 `llm` 或 `embedding`。向量模型支持 `?concurrent_batches=true`，同时提交两批固定诊断文本，核对返回条数和向量维数 |

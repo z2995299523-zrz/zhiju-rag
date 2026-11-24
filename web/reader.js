@@ -66,7 +66,7 @@ function decodeOriginal(buffer) {
   }
 }
 
-async function renderText(signal) {
+async function renderFromBytes(kind, locator, signal) {
   paneStatus("正在读取原始文件…");
   try {
     const response = await fetch(base + "/download", {cache:"no-store", signal});
@@ -78,16 +78,28 @@ async function renderText(signal) {
       }
       throw new Error("HTTP " + response.status);
     }
-    const rawText = decodeOriginal(await response.arrayBuffer());
+    const bytes = await response.arrayBuffer();
     if (signal.aborted) return;
+    const pane = byId("original-pane");
+    if (kind === "slides" || kind === "workbook") {
+      const { renderSlides, renderWorkbook } = await import("./reader-office.js");
+      if (!signal.aborted) await (kind === "slides" ? renderSlides : renderWorkbook)(pane, bytes, locator, signal);
+      return;
+    }
+    const rawText = decodeOriginal(bytes);
+    if (kind === "markdown") {
+      const { renderMarkdownFile } = await import("./reader-markdown.js");
+      if (!signal.aborted) renderMarkdownFile(pane, rawText);
+      return;
+    }
     const pre = document.createElement("pre");
     pre.className = "source-text";
     pre.tabIndex = 0;
     pre.setAttribute("aria-label", "原始文件内容");
     pre.textContent = rawText;
-    byId("original-pane").replaceChildren(pre);
+    pane.replaceChildren(pre);
   } catch {
-    if (!signal.aborted) paneStatus("原始文本读取失败，可以下载原件查看。");
+    if (!signal.aborted) paneStatus("原件预览失败，可以下载原件查看。");
   }
 }
 
@@ -113,10 +125,11 @@ function render({document: doc, citation_locator: locator, original_kind: kind},
   byId("reader").hidden = false;
   if (isPdf && navigator.pdfViewerEnabled === false) {
     paneStatus("当前浏览器未启用 PDF 内嵌预览。可在新标签打开或下载原件。");
-  } else if (isPdf) {
+  } else if (isPdf || kind === "html") {
     const frame = document.createElement("iframe");
-    frame.title = doc.filename + " · PDF 原件";
-    frame.src = address;
+    frame.title = doc.filename + (isPdf ? " · PDF 原件" : " · 网页预览");
+    if (!isPdf) frame.setAttribute("sandbox", "");
+    frame.src = isPdf ? address : base + "/html-preview";
     pane.append(frame);
   } else if (kind === "image") {
     const image = document.createElement("img");
@@ -124,8 +137,8 @@ function render({document: doc, citation_locator: locator, original_kind: kind},
     image.onerror = () => paneStatus("原图加载失败，可以下载原件查看。");
     image.src = address;
     pane.append(image);
-  } else if (kind === "text") {
-    void renderText(signal);
+  } else if (kind) {
+    void renderFromBytes(kind, locator, signal);
   } else {
     paneStatus("此格式请下载原件，使用对应应用查看完整排版。");
   }

@@ -159,16 +159,20 @@ async def guard(request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     pdf_preview = getattr(request.state, "pdf_preview", False)
+    html_preview = getattr(request.state, "html_preview", False)
     reader_page = request.url.path == "/reader.html"
-    response.headers["X-Frame-Options"] = "SAMEORIGIN" if pdf_preview or reader_page else "DENY"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN" if pdf_preview or html_preview or reader_page else "DENY"
     response.headers["Referrer-Policy"] = "same-origin"
     response.headers["Content-Security-Policy"] = ("default-src 'self'; script-src 'self'; "
-        "style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; img-src 'self' data:" + (" blob:" if reader_page else "") + "; connect-src 'self'; "
         "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors "
         + ("'self'" if reader_page else "'none'"))
     if pdf_preview:
         response.headers["Content-Security-Policy"] = ("default-src 'none'; object-src 'self'; "
             "base-uri 'none'; frame-ancestors 'self'; form-action 'none'")
+    if html_preview:
+        response.headers["Content-Security-Policy"] = ("sandbox; default-src 'none'; style-src 'unsafe-inline'; "
+            "img-src data:; font-src data:; media-src data:; base-uri 'none'; frame-ancestors 'self'; form-action 'none'")
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     return response

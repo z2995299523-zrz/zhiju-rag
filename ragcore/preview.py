@@ -6,9 +6,10 @@ from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Path as PathParam, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 
 from . import access
+from .documents import _decode
 from .ingest_worker import UploadBusyError, inspect_json, inspect_sheet
 from .source_window import TEXT_FORMATS, text_window
 from .storage import DOC_FIELDS
@@ -17,6 +18,8 @@ from .storage import DOC_FIELDS
 router = APIRouter(prefix="/api/documents", dependencies=[Depends(access.reader)])
 DocumentID = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
 SEARCH = " AND (instr(lower(text),lower(?))>0 OR instr(lower(locator),lower(?))>0 OR instr(lower(context),lower(?))>0)"
+HTML_FORMATS = {".htm", ".html"}
+RENDERED_FORMATS = {".htm": "html", ".html": "html", ".md": "markdown", ".xlsx": "workbook", ".pptx": "slides"}
 
 
 def original_mime(filename, signature):
@@ -50,9 +53,28 @@ def original_info(doc_id: DocumentID, request: Request, chunk_id: int | None = Q
     kind = None
     if mime:
         kind = "pdf" if mime == "application/pdf" else "image"
+    elif suffix in RENDERED_FORMATS:
+        kind = RENDERED_FORMATS[suffix]
     elif suffix in TEXT_FORMATS:
         kind = "text"
     return {"document": doc, "original_kind": kind, "citation_locator": locator}
+
+
+@router.get("/{doc_id}/html-preview", response_class=HTMLResponse)
+def html_preview(doc_id: DocumentID, request: Request):
+    with request.app.state.store.db() as conn:
+        row = conn.execute("SELECT filename FROM documents WHERE id=?", (doc_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "文档不存在")
+        if Path(row["filename"]).suffix.lower() not in HTML_FORMATS:
+            raise HTTPException(415, "此文件不是 HTML 网页")
+        content = conn.execute("SELECT content FROM documents WHERE id=?", (doc_id,)).fetchone()[0]
+    try:
+        markup = _decode(content)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    request.state.html_preview = True
+    return HTMLResponse(markup, headers={"Cross-Origin-Resource-Policy": "same-origin"})
 
 
 @router.get("/{doc_id}/preview")
