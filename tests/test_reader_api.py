@@ -234,6 +234,12 @@ class ReaderApiTests(unittest.TestCase):
         preview_url = f"/api/documents/{ident}/preview"
         view = self.ok(self.reader.get(preview_url))
         self.assertEqual(view["original_kind"], "pdf")
+        info_url = f"/api/documents/{ident}/original-info"
+        info = self.ok(self.reader.get(info_url, params={"chunk_id": view["chunks"][0]["id"]}))
+        self.assertEqual((info["original_kind"], info["citation_locator"]), ("pdf", "第 1 页"))
+        self.assertEqual(info["document"]["sha256"], hashlib.sha256(data).hexdigest())
+        self.assertNotIn("chunks", info)
+        self.assertEqual(self.reader.get(info_url, params={"chunk_id": 2**40}).status_code, 404)
         url = view["original_url"]
         original = self.reader.get(url)
         self.assertEqual(original.content, data)
@@ -256,7 +262,7 @@ class ReaderApiTests(unittest.TestCase):
         outside = self.reader.get(url, headers={"Range": f"bytes={len(data)}-"})
         self.assertEqual((outside.status_code, outside.headers["content-range"]), (416, f"bytes */{len(data)}"))
         self.ok(self.reader.post("/api/logout"))
-        for endpoint in (url, preview_url):
+        for endpoint in (url, preview_url, info_url):
             self.assertEqual(self.reader.get(endpoint).status_code, 401)
 
     def test_images_and_untrusted_file_types(self):
@@ -274,6 +280,10 @@ class ReaderApiTests(unittest.TestCase):
         html = b"<p>Online content</p><script>hiddenContent()</script>"
         doc = self.upload("notice.html", html)
         fake = self.add_stored("bad.jpg", html)
+        office = self.add_stored("layout.docx", b"original office bytes")
+        self.assertEqual(self.ok(self.reader.get(f"/api/documents/{doc}/original-info"))["original_kind"], "text")
+        for ident in (office, fake):
+            self.assertIsNone(self.ok(self.reader.get(f"/api/documents/{ident}/original-info"))["original_kind"])
         for ident in (doc, fake):
             view = self.ok(self.reader.get(f"/api/documents/{ident}/preview"))
             self.assertIsNone(view["original_url"])

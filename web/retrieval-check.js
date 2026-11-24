@@ -2,19 +2,31 @@ import { managementNav } from "./admin.js";
 
 const candidateMethods = { all:"小库全量候选", fts5:"FTS5 全文召回" };
 const rankingMethods = { lexical:"词法排序", hybrid:"词法与向量融合", lexical_fallback:"本次无向量命中，采用词法排序" };
+const embeddingOutcomes = {ranked:"向量参与重排", below_threshold:"候选未达到向量阈值", busy:"向量服务繁忙",
+  timeout:"向量请求超时", transport:"向量服务连接异常", invalid_response:"向量响应格式异常"};
 
-function showResult(target, {metrics, top_chunks}, esc) {
+function showResult(target, {metrics, top_chunks, embedding}, esc) {
   const item = metrics.evidence[0];
   const stage = item.stage === "hit" ? "期望证据进入前 " + metrics.top_k + " 名"
     : item.in_candidates ? "期望证据已召回，重排后未进入前 " + metrics.top_k + " 名" : "候选中缺少期望证据";
   const rank = item.rank ? "最佳名次为第 " + item.rank + " 名" : "排序结果中未命中";
   const position = item.expected.locator ? " · " + item.expected.locator : " · 整份文档";
+  const semanticStatus = embeddingOutcomes[embedding?.outcome] || (metrics.ranking_method === "hybrid" ? "向量参与重排" : "本次未取得向量分数");
+  const dimension = Number.isInteger(embedding?.dimension) ? ` · ${embedding.dimension} 维` : "";
+  const hasScores = top_chunks.some(row => Number.isFinite(row.semantic_score));
   target.innerHTML = `<h2>${esc(stage)}</h2><p class="rc-target">${esc(item.expected.filename + position)}</p>
     <dl class="rc-stage-list"><div><dt>候选召回</dt><dd>${item.in_candidates ? "命中" : "未命中"} · ${metrics.candidate_count} 个候选分块 · ${esc(candidateMethods[metrics.candidate_method] || metrics.candidate_method)}</dd></div>
-    <div><dt>重排</dt><dd>${esc(rank)} · ${metrics.ranked_count} 个分块保留 · ${esc(rankingMethods[metrics.ranking_method] || metrics.ranking_method)}</dd></div></dl>
-    ${top_chunks.length ? `<h3>前 ${metrics.top_k} 名中的实际分块</h3><ol class="rc-ranking">${top_chunks.map(row => {
+    <div><dt>重排</dt><dd>${esc(rank)} · ${metrics.ranked_count} 个分块保留 · ${esc(rankingMethods[metrics.ranking_method] || metrics.ranking_method)}</dd></div>
+    <div><dt>向量模型</dt><dd>${semanticStatus}${dimension}</dd></div></dl>
+    ${top_chunks.length ? `<h3>前 ${metrics.top_k} 名中的实际分块</h3>
+    ${hasScores ? '<p class="rc-score-note">条形表示分块与问题的余弦相似度（−1 至 1）。列表按最终融合名次排列。</p>' : ""}
+    <ol class="rc-ranking">${top_chunks.map(row => {
       const link = "/reader.html?" + new URLSearchParams({id:row.document_id, chunk:row.chunk_id});
-      return `<li><a href="${esc(link)}" target="_blank" rel="noopener">${esc(row.filename)} · ${esc(row.locator)}</a><p>${esc(row.text)}</p></li>`;
+      const score = Number.isFinite(row.semantic_score) ? row.semantic_score.toFixed(4) : null;
+      const bar = score === null ? '<span class="rc-score-missing">无向量分数</span>' :
+        `<meter min="-1" max="1" value="${score}" aria-label="余弦相似度"></meter><strong>${score}</strong>`;
+      return `<li><a href="${esc(link)}" target="_blank" rel="noopener">${esc(row.filename)} · ${esc(row.locator)}</a>
+        <p>${esc(row.text)}</p>${hasScores ? `<div class="rc-score">${bar}</div>` : ""}</li>`;
     }).join("")}</ol>` : "<p>本次没有可展示的排序结果。</p>"}`;
 }
 

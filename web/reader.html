@@ -9,59 +9,37 @@
   <script type="module" src="/reader.js"></script>
 </head>
 <body>
-  <a class="skip-link" href="#content">跳至文档内容</a>
+  <a class="skip-link" href="#original-pane">跳至原件</a>
   <header class="header"><div class="header-inner">
-    <div class="brand-line"><a href="/" class="brand" aria-label="澄知 RAG，返回问答">
+    <a href="/" class="brand" aria-label="澄知 RAG，返回问答">
       <svg viewBox="0 0 32 32" width="27" height="27" aria-hidden="true"><path d="m3 11 13-7 13 7-13 7z" fill="currentColor"/><path d="m4 17 12 7 12-7m-24 5 12 7 12-7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/></svg>澄知 RAG</a>
-      <span class="header-divider" aria-hidden="true"></span><span>文档阅读</span></div>
     <a class="back" href="/#documents"><span aria-hidden="true">←</span> 返回文档库</a>
   </div></header>
   <main>
-    <div id="message-panel" class="message-panel" role="status">
+    <section id="message-panel" class="message-panel" role="status">
       <h1 id="message-title">正在打开文档…</h1><p id="message-detail"></p>
-      <div class="message-actions"><button id="retry" class="btn" type="button" hidden>重试</button><a id="login" class="btn primary" href="/" target="_blank" rel="noopener noreferrer" hidden>前往工作台登录</a>
-        <a id="message-download" class="btn" download hidden>下载原件</a></div>
-    </div>
-    <div id="reader" hidden>
-      <header class="document-head">
-        <div class="document-title"><h1 id="filename"></h1>
-          <p class="file-meta"><span id="extension"></span><span id="file-size"></span><span id="created"></span><span id="archived" class="archived" hidden>历史版本</span></p>
-        </div>
-        <a class="btn" id="download" download><svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M10 2v10m-4-4 4 4 4-4M3 13v3h14v-3"/></svg>下载原件</a>
-      </header>
-      <div class="toolbar">
-        <div class="view-options" id="view-options" role="group" aria-label="阅读方式" hidden>
-          <button id="text-mode" type="button" aria-pressed="true">提取文本</button>
-          <button id="original-mode" type="button" aria-pressed="false">原版</button>
-        </div>
-        <div id="text-label"><strong class="toolbar-label">提取文本</strong><p id="format-help">可下载原件查看完整排版。</p></div>
-        <form class="search" id="search-form" role="search">
-          <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5"/><path d="m13 13 4 4"/></svg>
-          <input id="search-input" type="search" aria-label="在整篇文档中搜索" maxlength="200" placeholder="在整篇文档中搜索">
-          <button class="search-button" type="submit">搜索</button>
-        </form>
-        <a id="open-original" class="subtle-link" target="_blank" rel="noopener noreferrer" hidden>单独打开原版 ↗</a>
+      <div class="message-actions">
+        <button id="retry" class="btn" type="button" hidden>重试</button>
+        <a id="login" class="btn primary" href="/" target="_blank" rel="noopener noreferrer" hidden>前往工作台登录</a>
+        <a id="message-download" class="btn" download hidden>下载原件</a>
+        <a id="document-home" class="btn" hidden>打开原件首页</a>
       </div>
-      <section id="content" tabindex="-1" aria-label="文档内容">
-        <div id="text-pane">
-          <div class="result-meta"><p id="summary" aria-live="polite"></p>
-            <button class="subtle-link" type="button" id="back-to-cite" hidden>回到引用位置</button>
-            <div id="quick-pages" class="quick-pages" aria-label="翻页" hidden><button type="button" class="quick-btn" id="quick-prev" aria-label="上一页">←</button><button type="button" class="quick-btn" id="quick-next" aria-label="下一页">→</button></div>
-          </div>
-          <div id="reading-layout" class="reading-layout">
-            <nav id="outline" class="outline" aria-label="本页位置" hidden><h2>本页位置</h2><ol id="locators"></ol></nav>
-            <div class="paper"><div id="chunks"></div></div>
-          </div>
-          <form id="pagination" class="pagination" aria-label="文档分页" hidden>
-            <button type="button" class="btn" id="previous">上一页</button>
-            <label>第 <input id="page-number" aria-label="跳至页码，回车确认" type="number" min="1" step="1" inputmode="numeric" required> / <span id="page-count"></span> 页</label>
-            <button type="submit" class="sr-only">跳转</button><button type="button" class="btn" id="next">下一页</button>
-          </form>
+    </section>
+    <section id="reader" aria-labelledby="filename" hidden>
+      <header class="document-head">
+        <div class="document-title">
+          <h1 id="filename"></h1>
+          <p class="file-meta"><span id="file-size"></span><span id="archived" class="archived" hidden>历史版本</span>
+            <span id="citation-location" hidden></span></p>
         </div>
-        <div id="native-pane" class="native-pane" hidden></div>
-      </section>
+        <div class="file-actions">
+          <a class="btn" id="open-original" target="_blank" rel="noopener noreferrer" hidden>在新标签打开原件 ↗</a>
+          <a class="btn primary" id="download" download>下载原件</a>
+        </div>
+      </header>
+      <div id="original-pane" class="original-pane" tabindex="-1" aria-label="文件原件"></div>
       <details id="checksum" class="checksum" hidden><summary>原件校验值（SHA-256）</summary><code id="digest"></code></details>
-    </div>
+    </section>
   </main>
 </body>
 </html>

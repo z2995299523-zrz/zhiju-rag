@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from . import access, model_config, retrieval
+from .query_trace import active_stage
 
 
 router = APIRouter(prefix="/api/admin/retrieval", dependencies=[Depends(access.admin)])
@@ -40,13 +41,20 @@ def evaluate(payload: RetrievalCheck, request: Request):
             if chunk is None:
                 raise HTTPException(422, "所选分块不属于当前文档版本")
             expected.update(chunk_id=payload.chunk_id, locator=chunk["locator"])
-    with model_config.workspace(store):
-        ranking = retrieval.rank_document_chunks(store, payload.question)
+    stage = {"notes": []}
+    token = active_stage.set(stage)
+    try:
+        with model_config.workspace(store):
+            ranking = retrieval.rank_document_chunks(store, payload.question)
+    finally:
+        active_stage.reset(token)
     with store.db() as conn:
         if not conn.execute("SELECT 1 FROM documents WHERE id=? AND active=1", (payload.document_id,)).fetchone():
             raise HTTPException(409, "评测期间文档已移除或换版，请重新选择后再测")
     scores = retrieval.score_evidence(ranking, [expected], top_k=payload.top_k)
     top = [{"document_id": row["document_id"], "chunk_id": row["id"], "filename": row["filename"],
-            "locator": row["locator"], "text": row["text"][:200]}
+            "locator": row["locator"], "text": row["text"][:200], "semantic_score": row.get("semantic_score")}
            for row in ranking.ranked[:payload.top_k]]
-    return {"metrics": scores, "top_chunks": top}
+    trace = stage.get("metrics", {})
+    embedding = {"dimension": trace.get("embedding_dimension"), "outcome": trace.get("embedding_outcome")}
+    return {"metrics": scores, "top_chunks": top, "embedding": embedding}

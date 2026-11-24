@@ -128,7 +128,7 @@ def service_state(port):
         paths = schema.get("paths", {})
         required = {"/api/query", "/api/query/stream", "/api/query/examples", "/api/admin/models",
                     "/api/documents", "/api/documents/{doc_id}/preview", "/api/admin/retrieval/evaluate",
-                    "/api/admin/accounts", "/api/account/password"}
+                    "/api/admin/accounts", "/api/account/password", "/api/documents/{doc_id}/original-info"}
         info = schema.get("info", {})
         if (info.get("title") == APP_TITLE and info.get("version") == __version__ and required.issubset(paths)
                 and supports_embedded_reader(port)):

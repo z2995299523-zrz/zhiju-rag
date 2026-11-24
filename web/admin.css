@@ -114,6 +114,14 @@
 .rc-ranking { margin: 0; padding-left: 2em; }
 .rc-ranking li { padding: 6px 0; }
 .rc-ranking p { margin: 3px 0 8px; font-size: 13px; }
+.rc-score-note, .rc-score-missing { color: var(--adm-muted); font-size: 12px; }
+.rc-score-note { margin-bottom: 8px; }
+.rc-score { display: flex; align-items: center; gap: 10px; margin: 4px 0 10px; font-size: 12px; }
+.rc-score meter { width: min(100%, 240px); min-width: 0; height: 11px; }
+.rc-score meter::-webkit-meter-bar { background: var(--paper); border-color: var(--adm-line); }
+.rc-score meter::-webkit-meter-optimum-value { background: var(--adm-accent); }
+.rc-score meter::-moz-meter-bar { background: var(--adm-accent); }
+.rc-score strong { color: var(--adm-accent); font-variant-numeric: tabular-nums; }
 .rc-result, .rc-form { overflow-wrap: anywhere; }
 @media (max-width: 560px) {
   .rc-pager button, .rc-actions button { min-height: 44px; }

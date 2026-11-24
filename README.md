@@ -52,7 +52,7 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8781 --no-proxy-headers
 | 回答引用了错行、表头或页码 | 在「导入管理」的导入结果或文件行点击「分块对照」。选择一个实际入库分块，在旁边核对对应版本的原件；窄屏可切换两者。PDF 按页定位，图片显示原图，文本按可用行号定位，XLSX 读取工作表中的原始单元格。需要原始版式的 DOCX、PPTX 可按提示下载核对 |
 | 提问用词和制度原文不同 | 在「管理后台 → 检索评测」输入问题，指定期望的文档或分块和检查名次。页面显示候选是否命中、重排后排第几，以及实际排在前面的分块。评测使用当前工作区的检索和向量配置，可以从结果打开原文。单题评测独立于问答历史 |
 
-在文档库点文件名或“在线查看”即可阅读已导入的文件。阅读器支持全文搜索、翻页和查看来源位置，现有文档无需重新导入。PDF、PNG 和 JPEG 还可在浏览器内查看原版。Word、Excel、PPT 等格式按导入时提取的正文、单元格或幻灯片内容展示，原件可下载。
+在文档库点文件名或“在线查看”即可打开已保存的原件，现有文档无需重新导入。PDF 交给浏览器内置阅读器，引用链接会打开当时版本并定位到原页。PNG、JPEG 显示原图。文本及结构化文本按源文件内容显示，HTML 以源代码查看。Office、TIFF 等格式可下载原件，使用对应应用查看版式。管理员可在「导入管理 → 分块对照」核对检索使用的解析结果。
 
 | 文件 | 可核验位置 |
 | --- | --- |
@@ -79,6 +79,8 @@ $env:RAG_OCR_ENABLED = "1"
 每文件最多识别 5 页，每张图片最多 1200 万像素、最长边 10000 像素，送入识别前最长边缩至 2000 像素。单文件解析限时 40 秒。已在 Windows 以真实 PNG、JPEG、多页 TIFF、纯扫描及混合 PDF 检查识别和页码。小字号、模糊图片、数字与表格可能被误读，业务数值请按引用位置核对原件。
 
 默认按中文相邻双字和英文词建立全文索引，结合词频、词的稀有程度、标题和问题覆盖率给候选片段排序。自动模式用已配置的接口关键词、描述、参数名和别名判断是文档、数据或混合查询。未命中文档会提示证据不足，必要条件缺失时会要求补充。业务项目、年份和指标口径越明确，越容易选中正确记录。
+
+文件原件、文本分块和 SQLite FTS5 索引在导入时保存。配置向量模型后，查询阶段会按需计算问题与候选分块的向量，用余弦相似度重排。向量保存在当前进程的有界缓存中，重启后按需重算。可在「管理后台 → 检索评测」查看本次模型是否参与重排、向量维数和进入最终排序的分块相似度。融合名次同时受关键词结果影响。
 
 ## 接入自己的业务数据
 
@@ -132,10 +134,11 @@ $env:RAG_OCR_ENABLED = "1"
 | 问答 | `POST /api/query`，正文 `{"question":"科研项目经费报销需要哪些材料？","mode":"auto"}`，返回 `answer`、`intent`、`status` 和 `citations` |
 | 流式问答 | `POST /api/query/stream` 接收相同请求，可用 `parent_id` 继续自己的历史会话。同一轮重试时复用 `request_id`（UUID），已归档的回答可直接恢复。SSE 事件包括阶段（`status`）、正文增量（`delta`）、真实依据（`evidence`）、已归档结果（`done`）和异常（`error`）。`GET /api/query/examples` 按已接入来源返回示例 |
 | 上传 / 下载原件 | `POST /api/documents`，multipart 表单中以 `files` 重复提交文件，按 `imported` 和 `errors` 检查每份结果。`GET /api/documents/{id}/download` 下载原件 |
-| 在线阅读 | `GET /api/documents/{id}/preview`，用 `q` 搜索正文或位置，`limit`、`offset` 分页，`chunk_id` 直达引用所在页。支持原版预览的文件另提供 `GET /api/documents/{id}/original` |
+| 在线阅读 | `GET /api/documents/{id}/original-info` 读取原件信息，可用 `chunk_id` 查引用位置。`GET /api/documents/{id}/original` 返回可内嵌的 PDF 或图片原字节 |
+| 检索分块 | `GET /api/documents/{id}/preview` 用 `q` 搜索分块文本或位置，`limit`、`offset` 分页，也可用 `chunk_id` 定位分块 |
 | 管理 / 测试接口 | `POST /api/connectors`、`PUT /api/connectors/{id}`、`POST /api/connectors/{id}/test`，测试正文示例 `{"params":{"year":2026}}` |
 | 模型配置（管理员） | `GET /api/admin/models` 查看生效配置；`PUT /api/admin/models/{kind}` 保存；`POST /api/admin/models/{kind}/test` 测试已保存配置或提交的草稿。`kind` 取 `llm` 或 `embedding`。向量模型支持 `?concurrent_batches=true`，同时提交两批固定诊断文本，核对返回条数和向量维数 |
-| 查询诊断、检索评测（管理员） | `GET /api/admin/query-traces` 按批次读取执行；`POST /api/admin/retrieval/evaluate` 提交 `question`、`document_id`、可选 `chunk_id` 和 `top_k`，返回候选、重排名次和实际分块 |
+| 查询诊断、检索评测（管理员） | `GET /api/admin/query-traces` 按批次读取执行；`POST /api/admin/retrieval/evaluate` 提交 `question`、`document_id`、可选 `chunk_id` 和 `top_k`，返回候选、重排名次、实际分块和可用的向量相似度 |
 | 导入分块对照（管理员） | `GET /api/documents/{doc_id}/source-window?chunk_id=…` 读取所选版本的文本行或工作表单元格，PDF 与图片复用已鉴权的原版预览 |
 | 历史与概览 | `GET /api/history?scope=mine` 可用 `q` 搜索问题，`GET /api/history/{id}` 回放快照。管理员使用 `scope=workspace` 查看工作区查询，在 `GET /api/overview` 查看统计 |
 | 下载接口证据 | `GET /api/history/{id}/sources/{source_id}/raw` 下载当次原始响应，`GET /api/history/{id}/sources/{source_id}/rows` 下载提取出的记录数组，`source_id` 取本次答案内的引文编号，如 `S1` |

@@ -30,6 +30,31 @@ def original_mime(filename, signature):
     return None
 
 
+@router.get("/{doc_id}/original-info")
+def original_info(doc_id: DocumentID, request: Request, chunk_id: int | None = Query(None, ge=1, le=2**63 - 1)):
+    with request.app.state.store.db() as conn:
+        row = conn.execute("SELECT filename,size,sha256,created_at,active,substr(content,1,12) AS sig "
+                           "FROM documents WHERE id=?", (doc_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "文档不存在")
+        locator = None
+        if chunk_id is not None:
+            chunk = conn.execute("SELECT locator FROM chunks WHERE id=? AND document_id=?", (chunk_id, doc_id)).fetchone()
+            if chunk is None:
+                raise HTTPException(404, "此引用段落不存在于该文档版本")
+            locator = chunk["locator"]
+    doc = dict(row)
+    mime = original_mime(doc["filename"], doc.pop("sig"))
+    doc["active"] = bool(doc["active"])
+    suffix = Path(doc["filename"]).suffix.lower()
+    kind = None
+    if mime:
+        kind = "pdf" if mime == "application/pdf" else "image"
+    elif suffix in TEXT_FORMATS:
+        kind = "text"
+    return {"document": doc, "original_kind": kind, "citation_locator": locator}
+
+
 @router.get("/{doc_id}/preview")
 def preview(doc_id: DocumentID, request: Request, q: str = Query("", max_length=256),
             offset: int = Query(0, ge=0, le=2**31 - 1), limit: int = Query(30, ge=1, le=100),
@@ -132,7 +157,7 @@ def original(doc_id: DocumentID, request: Request, range_header: str | None = He
             raise HTTPException(404, "文档不存在")
         mime = original_mime(row["filename"], row["sig"])
         if not mime:
-            raise HTTPException(415, "该格式支持在线阅读提取正文，也可下载原件")
+            raise HTTPException(415, "该格式请下载原件查看")
         size, etag = row["size"], '"' + row["sha256"] + '"'
         span = byte_range(range_header, size) if request.headers.get("if-range", etag) == etag else None
         first, last = span or (0, size - 1)

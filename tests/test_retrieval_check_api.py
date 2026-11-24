@@ -6,6 +6,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from main import create_app
+from ragcore import models
 
 
 class RetrievalCheckApiTests(unittest.TestCase):
@@ -52,3 +53,22 @@ class RetrievalCheckApiTests(unittest.TestCase):
     def test_import_reports_duration_only_when_parser_ran(self):
         self.assertGreaterEqual(self.upload("损坏.json", "{")["errors"][0]["parse_ms"], 0)
         self.assertNotIn("parse_ms", self.upload("x" * 201 + ".txt", "a")["errors"][0])
+
+    def test_reports_measured_similarity_without_returning_vectors(self):
+        document = self.upload("设备记录.txt", "设备需要登记设备编号。")['imported'][0]
+        payload = {"question": "设备编号如何登记？", "document_id": document["id"]}
+        disabled = self.client.post(self.endpoint, json=payload).json()
+        self.assertEqual(disabled["embedding"], {"dimension": None, "outcome": None})
+        self.assertIsNone(disabled["top_chunks"][0]["semantic_score"])
+
+        def vectors(settings, inputs, timeout):
+            return [models._vector([1, 0, 0] if i == 0 else [3, 4, 0]) for i in range(len(inputs))]
+
+        with (patch.dict(os.environ, {"RAG_EMBED_BASE_URL": "http://127.0.0.1:1/v1",
+                                      "RAG_EMBED_MODEL": "test-visualization", "RAG_EMBED_MIN_SCORE": "0.50"}),
+              patch.object(models, "_request_vectors", side_effect=vectors)):
+            response = self.client.post(self.endpoint, json=payload)
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(result["embedding"], {"dimension": 3, "outcome": "ranked"})
+        self.assertAlmostEqual(result["top_chunks"][0]["semantic_score"], 0.6)
